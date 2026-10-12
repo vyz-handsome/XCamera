@@ -1,0 +1,10 @@
+<resources>
+    <color name="xcam_bg">#0A0C14</color>
+    <color name="xcam_surface">#141826</color>
+    <color name="xcam_surface_high">#1E2336</color>
+    <color name="xcam_cyan">#22D3EE</color>
+    <color name="xcam_purple">#8B5CF6</color>
+    <color name="xcam_text">#F2F5FA</color>
+    <color name="xcam_text_dim">#8A93A8</color>
+    <color name="xcam_record">#EF4444</color>
+</resources>

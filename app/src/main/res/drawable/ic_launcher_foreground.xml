@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Sudut viewfinder -->
+    <path android:strokeWidth="3" android:strokeLineCap="round" android:fillColor="#00000000"
+        android:pathData="M30,40 L30,32 L38,32 M70,32 L78,32 L78,40 M78,68 L78,76 L70,76 M38,76 L30,76 L30,68">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:startX="30" android:startY="30" android:endX="78" android:endY="78"
+                android:startColor="#22D3EE" android:endColor="#8B5CF6" android:type="linear" />
+        </aapt:attr>
+    </path>
+    <!-- Cincin lensa -->
+    <path android:strokeWidth="4" android:fillColor="#00000000"
+        android:pathData="M54,54m-19,0a19,19 0,1 1,38 0a19,19 0,1 1,-38 0">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:startX="35" android:startY="35" android:endX="73" android:endY="73"
+                android:startColor="#22D3EE" android:endColor="#3B82F6" android:type="linear" />
+        </aapt:attr>
+    </path>
+    <!-- Huruf X -->
+    <path android:strokeWidth="6" android:strokeLineCap="round" android:fillColor="#00000000"
+        android:pathData="M46,46 L62,62 M62,46 L46,62">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:startX="44" android:startY="44" android:endX="64" android:endY="64"
+                android:startColor="#3B82F6" android:endColor="#8B5CF6" android:type="linear" />
+        </aapt:attr>
+    </path>
+</vector>
