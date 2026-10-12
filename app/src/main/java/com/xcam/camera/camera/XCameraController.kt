@@ -51,10 +51,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
 import com.xcam.camera.settings.Prefs
+import com.xcam.camera.video.SoftwareVideoStabilizer
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import kotlin.math.hypot
 
 private class LensCandidate(val id: String, val eqFocal: Float, val megapixel: Float)
@@ -85,6 +88,10 @@ class XCameraController(
 
     interface RecordingCallback {
         fun onProgress(durationMs: Long)
+        /** Video recording has ended and software stabilization is being processed. */
+        fun onStabilizationStarted() {}
+        /** Software stabilization failed; the original unmodified recording is preserved. */
+        fun onStabilizationFallback() {}
         fun onFinished(uri: Uri)
         fun onFailed(message: String)
     }
@@ -140,8 +147,10 @@ class XCameraController(
     val isCameraBound: Boolean get() = camera != null
 
     /** EIS (stabilisasi digital video): didukung kamera aktif, pilihan user, dan benar-benar aktif. */
+    /** The app can software-stabilize recorded video whenever the VideoCapture use case is available. */
     var stabilizationSupported: Boolean = false
         private set
+    /** User's software EIS toggle; applied to the saved video after capture, not to live preview. */
     var stabilizationOn: Boolean = false
         private set
     var stabilizationActive: Boolean = false
@@ -238,6 +247,7 @@ class XCameraController(
 
     private var currentRotation = Surface.ROTATION_0
     private val mainExecutor = ContextCompat.getMainExecutor(activity)
+    private val stabilizationExecutor = Executors.newSingleThreadExecutor()
 
     private val orientationListener = object : OrientationEventListener(activity) {
         override fun onOrientationChanged(orientation: Int) {
@@ -292,6 +302,7 @@ class XCameraController(
         previewView.removeCallbacks(retryZoomRunnable)
         freezeView.removeCallbacks(freezeTimeout)
         recording?.stop()
+        stabilizationExecutor.shutdown()
     }
 
     fun switchCamera() {
@@ -606,21 +617,15 @@ class XCameraController(
     }
 
     /**
-     * Nyalakan/matikan EIS pada Video dan video yang menjadi bagian Live Photo.
-     * Pemanggil harus menghentikan buffer Live Photo lebih dulu agar bind ulang
-     * tidak memutus file yang sedang direkam.
-     * @return true bila status yang diminta berhasil diterapkan.
+     * Toggle app-side software EIS. No unsupported Camera2 request is sent; the recorded MP4
+     * is stabilized after capture. Live Photo calls this only after its rolling segment stops.
      */
     fun toggleStabilization(): Boolean {
-        // recording mencakup rekaman video biasa maupun segmen buffer Live Photo.
-        if (isRecording || recording != null || !stabilizationSupported) return false
-        // Gunakan status yang benar-benar aktif agar ketukan berikutnya bisa mencoba ulang
-        // bila perangkat melaporkan dukungan EIS, tetapi kombinasi stream sebelumnya gagal.
-        stabilizationOn = !stabilizationActive
+        if (isRecording || recording != null || !videoAvailable || !stabilizationSupported) return false
+        stabilizationOn = !stabilizationOn
+        stabilizationActive = stabilizationOn
         prefs.edit().putBoolean(KEY_VIDEO_EIS, stabilizationOn).apply()
-        bind(keepZoom = true)
-        // Kamera kadang mendukung EIS secara umum tetapi tidak pada kombinasi stream aktif.
-        return stabilizationActive == stabilizationOn
+        return true
     }
 
     /** @return false jika video tidak tersedia atau gagal dimulai. */
@@ -657,7 +662,36 @@ class XCameraController(
                         val uri = event.outputResults.outputUri
                         val valid = uri != Uri.EMPTY &&
                             event.error != VideoRecordEvent.Finalize.ERROR_NO_VALID_DATA
-                        if (valid) {
+                        if (valid && stabilizationOn) {
+                            callback.onStabilizationStarted()
+                            try {
+                                stabilizationExecutor.execute {
+                                    val input = File(activity.cacheDir, "xcam_eis_in_${System.nanoTime()}.mp4")
+                                    val output = File(activity.cacheDir, "xcam_eis_out_${System.nanoTime()}.mp4")
+                                    var stabilizedUri: Uri? = null
+                                    try {
+                                        activity.contentResolver.openInputStream(uri)?.use { src ->
+                                            input.outputStream().use { dst -> src.copyTo(dst) }
+                                        } ?: throw IllegalStateException("Video sumber tidak bisa dibaca")
+                                        if (SoftwareVideoStabilizer.stabilize(input, output)) {
+                                            stabilizedUri = saveStabilizedMedia(uri, output)
+                                        }
+                                    } catch (_: Exception) {
+                                        stabilizedUri = null
+                                    } finally {
+                                        input.delete()
+                                        output.delete()
+                                    }
+                                    mainExecutor.execute {
+                                        if (stabilizedUri == null) callback.onStabilizationFallback()
+                                        callback.onFinished(stabilizedUri ?: uri)
+                                    }
+                                }
+                            } catch (_: RejectedExecutionException) {
+                                callback.onStabilizationFallback()
+                                callback.onFinished(uri)
+                            }
+                        } else if (valid) {
                             callback.onFinished(uri)
                         } else {
                             callback.onFailed("Rekaman terlalu singkat atau gagal disimpan")
@@ -673,6 +707,44 @@ class XCameraController(
             isRecording = false
             recording = null
             false
+        }
+    }
+
+    /** Write the processed file as a new MediaStore item, then remove the original only on success. */
+    private fun saveStabilizedMedia(original: Uri, stabilized: File): Uri? {
+        val resolver = activity.contentResolver
+        val originalName = try {
+            resolver.query(original, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        } catch (_: Exception) { null } ?: "XCAM_VID_${System.currentTimeMillis()}.mp4"
+        val base = originalName.substringBeforeLast('.', originalName)
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "${base}_EIS.mp4")
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Movies/XCamera")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+        }
+        val newUri = try { resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) } catch (_: Exception) { null } ?: return null
+        return try {
+            resolver.openOutputStream(newUri, "w")?.use { out -> stabilized.inputStream().use { it.copyTo(out) } }
+                ?: throw IllegalStateException("MediaStore output tidak tersedia")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val published = resolver.update(
+                    newUri,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null,
+                    null
+                )
+                if (published <= 0) throw IllegalStateException("Hasil stabilisasi belum bisa dipublikasikan")
+            }
+            resolver.delete(original, null, null)
+            newUri
+        } catch (_: Exception) {
+            try { resolver.delete(newUri, null, null) } catch (_: Exception) {}
+            null
         }
     }
 
@@ -737,13 +809,14 @@ class XCameraController(
         sb.append("\nMode stabilisasi Camera2: ").append(eisModeLabel)
         sb.append("\nMode video yang dilaporkan Camera2: ")
             .append(reportedVideoStabilizationModes.joinToString(prefix = "[", postfix = "]"))
-        sb.append("\nEIS: ").append(
+        sb.append("\nEIS software: ").append(
             when {
-                !stabilizationSupported -> "tidak diiklankan oleh Camera2 pada kamera aktif"
-                stabilizationActive -> "diminta aktif via $eisModeLabel"
-                else -> "didukung via $eisModeLabel, sedang mati"
+                !videoAvailable -> "tidak tersedia karena VideoCapture tidak aktif"
+                stabilizationActive -> "aktif; MP4 diproses setelah perekaman"
+                else -> "mati; ketuk EIS SW untuk mengaktifkan"
             }
         )
+        sb.append("\nStabilisasi hardware Camera2: ").append(if (activeStabilizationMode != null) "tersedia di metadata, tidak dipakai oleh XCam" else "tidak didukung oleh kamera aktif")
         sb.append(cameraDiagnostics())
         return sb.toString()
     }
@@ -983,11 +1056,9 @@ class XCameraController(
 
             // Coba preview + foto + video sekaligus, lalu turunkan bila kombinasi tidak didukung.
             val lowerOk = videoQuality == Quality.UHD || videoQuality == Quality.FHD
+            // Always record a normal stream. EIS is applied by SoftwareVideoStabilizer to the
+            // finished MP4, so a camera reporting only [OFF] can still use the app-side option.
             val base = buildList<Pair<Quality?, Boolean>> {
-                if (stabilizationOn && requestedStabilizationMode != null) {
-                    add(Pair(videoQuality, true))
-                    if (lowerOk) add(Pair(Quality.HD, true))
-                }
                 add(Pair(videoQuality, false))
                 if (lowerOk) add(Pair(Quality.HD, false))
                 add(Pair(null, false))
@@ -1087,8 +1158,8 @@ class XCameraController(
             }
             effectiveQuality = resolveQuality(supportedQualities)
             activeStabilizationMode = supportedStabilizationMode(cam.cameraInfo)
-            stabilizationSupported = boundVideo != null && activeStabilizationMode != null
-            stabilizationActive = boundStab && stabilizationSupported
+            stabilizationSupported = boundVideo != null
+            stabilizationActive = stabilizationOn && stabilizationSupported
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
             effectiveFps = if (boundFps in supportedFps) boundFps else 0
 
@@ -1197,6 +1268,8 @@ class XCameraController(
     /** Dipanggil saat kembali dari Settings: bind ulang hanya jika ukuran foto atau kualitas video berubah. */
     fun reloadSettings() {
         if (isRecording || camera == null) return
+        stabilizationOn = prefs.getBoolean(KEY_VIDEO_EIS, stabilizationOn)
+        stabilizationActive = stabilizationOn && videoAvailable
         val now = prefs.getString(Prefs.PHOTO_SIZE, "auto") ?: "auto"
         val q = qualityFromName(prefs.getString(KEY_VIDEO_QUALITY, "FHD"))
         val qualityChanged = q != videoQuality

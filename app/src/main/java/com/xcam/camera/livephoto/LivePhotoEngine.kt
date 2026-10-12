@@ -6,6 +6,7 @@ import android.os.Looper
 import androidx.appcompat.app.AppCompatActivity
 import com.xcam.camera.camera.XCameraController
 import com.xcam.camera.gallery.MediaStoreHelper
+import com.xcam.camera.video.SoftwareVideoStabilizer
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -38,6 +39,8 @@ class LivePhotoEngine(
         /** Foto sudah tersimpan (belum digabung video); dipakai untuk thumbnail cepat. */
         fun onStillSaved(photoUri: Uri)
         fun onUnsupported()
+        /** The original Live Photo clip was kept because software stabilization failed. */
+        fun onStabilizationFallback() {}
     }
 
     private enum class State { OFF, ROLLING, ROTATING, CAPTURING, FINALIZING, STOPPING }
@@ -325,23 +328,36 @@ class LivePhotoEngine(
     private fun process(file: File, photo: Uri, pivot: Long, saved: Long) {
         val job = Runnable {
             val trimmed = File(activity.cacheDir, "live_trim_${System.nanoTime()}.mp4")
+            val stabilized = File(activity.cacheDir, "live_eis_${System.nanoTime()}.mp4")
             var success = false
+            var stabilizationFallback = false
             try {
                 val startMs = maxOf(0L, pivot - PRE_MS)
                 val baseUs = VideoTrimmer.trimStart(file, trimmed, startMs * 1000L)
                 if (baseUs >= 0 && trimmed.length() > 0) {
+                    var finalClip = trimmed
+                    if (controller.stabilizationOn) {
+                        if (SoftwareVideoStabilizer.stabilize(trimmed, stabilized)) {
+                            finalClip = stabilized
+                        } else {
+                            // Do not discard the Live Photo if encoding fails; retain original clip.
+                            stabilizationFallback = true
+                        }
+                    }
                     // Perkiraan saat foto diambil: sedikit sebelum foto selesai disimpan.
                     val stillMs = maxOf(pivot, saved - STILL_LATENCY_MS)
                     val presentationUs = maxOf(0L, stillMs * 1000L - baseUs)
-                    success = MotionPhotoWriter.combine(activity, photo, trimmed, presentationUs)
+                    success = MotionPhotoWriter.combine(activity, photo, finalClip, presentationUs)
                 }
             } catch (e: Exception) {
                 success = false
             } finally {
                 file.delete()
                 trimmed.delete()
+                stabilized.delete()
             }
             handler.post {
+                if (stabilizationFallback) callback.onStabilizationFallback()
                 if (success) callback.onLiveSaved(photo) else callback.onLiveFailed("gagal menggabungkan video")
             }
         }

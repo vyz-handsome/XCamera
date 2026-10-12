@@ -22,3 +22,10 @@ Tips: tekan lama logo "XCAM" di layar kamera untuk melihat info lensa yang terde
 
 - Tahap 8g: flash tetap bisa dipakai di lensa ultra-wide 0,5x (lampu dipinjam dari kamera utama lewat torch) untuk foto, Live Photo, dan senter video.
 - Tahap 8h: EIS bisa diaktifkan dari mode Video maupun LIVE. Stabilisasi diterapkan pada VideoCapture yang juga merekam klip video di dalam Live Photo; saat pengaturan diganti, buffer dihentikan dan dimulai ulang dengan aman. Indikator menampilkan status EIS yang benar-benar aktif.
+
+
+## Software EIS (Tahap 9)
+
+Tombol **EIS SW** menjalankan stabilisasi software setelah rekaman video selesai, memakai filter FFmpeg `deshake`. Hasil video stabil ditulis sebagai file baru di `Movies/XCamera`; file asli baru dihapus setelah hasil sukses ditulis. Untuk Live Photo, klip MP4 diproses sebelum ditempel ke JPEG. Jika proses gagal, XCam mempertahankan file asli dan memberi tahu pengguna. Karena ini post-processing, stabilisasi tidak berlaku pada preview langsung dan perlu waktu pemrosesan tambahan.
+
+Integrasi FFmpeg memakai paket `dev.ffmpegkit-maintained:ffmpeg-kit-full:6.0.3` (LGPL-3.0). Teks lisensi dan sumber pustaka tersedia di [repositori FFmpegKit Maintained](https://github.com/ffmpegkit-maintained/ffmpeg).
