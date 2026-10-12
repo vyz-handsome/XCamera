@@ -31,7 +31,7 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("xcam")
+            // Gunakan debug signing bawaan Android.
         }
         release {
             isMinifyEnabled = false
