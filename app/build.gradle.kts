@@ -31,7 +31,7 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("xcam")
+            // Gunakan debug signing bawaan Android untuk build GitHub Actions.
         }
         release {
             isMinifyEnabled = false
