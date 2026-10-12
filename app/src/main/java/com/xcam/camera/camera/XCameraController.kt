@@ -25,6 +25,7 @@ import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
@@ -145,6 +146,9 @@ class XCameraController(
         private set
     var stabilizationActive: Boolean = false
         private set
+    /** Native Camera2 mode selected from modes actually advertised by the active camera. */
+    private var activeStabilizationMode: Int? = null
+    private var reportedVideoStabilizationModes: List<Int> = emptyList()
 
     var activeLens: Lens = Lens.MAIN
         private set
@@ -725,11 +729,19 @@ class XCameraController(
         sb.append("\nVideo: ").append(if (videoAvailable) "tersedia" else "tidak tersedia bareng preview")
         val still = try { imageCapture?.resolutionInfo?.resolution } catch (e: Exception) { null }
         sb.append("\nUkuran foto saat ini: ").append(if (still != null) "${still.width}x${still.height}" else "belum diketahui")
+        val eisModeLabel = when (activeStabilizationMode) {
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION -> "PREVIEW_STABILIZATION"
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON -> "VIDEO_STABILIZATION_ON"
+            else -> "tidak ada"
+        }
+        sb.append("\nMode stabilisasi Camera2: ").append(eisModeLabel)
+        sb.append("\nMode video yang dilaporkan Camera2: ")
+            .append(reportedVideoStabilizationModes.joinToString(prefix = "[", postfix = "]"))
         sb.append("\nEIS: ").append(
             when {
-                !stabilizationSupported -> "tidak didukung kamera ini"
-                stabilizationActive -> "aktif"
-                else -> "didukung, sedang mati"
+                !stabilizationSupported -> "tidak diiklankan oleh Camera2 pada kamera aktif"
+                stabilizationActive -> "diminta aktif via $eisModeLabel"
+                else -> "didukung via $eisModeLabel, sedang mati"
             }
         )
         sb.append(cameraDiagnostics())
@@ -900,7 +912,13 @@ class XCameraController(
     // ---- Bind
 
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun buildVideo(q: Quality, rotation: Int, stabilize: Boolean, fps: Int): VideoCapture<Recorder> {
+    private fun buildVideo(
+        q: Quality,
+        rotation: Int,
+        stabilize: Boolean,
+        fps: Int,
+        stabilizationMode: Int
+    ): VideoCapture<Recorder> {
         val recorder = Recorder.Builder()
             .setQualitySelector(
                 QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q))
@@ -913,7 +931,7 @@ class XCameraController(
             // Ini meminta stabilisasi digital native dari kamera, bukan crop/post-processing manual.
             Camera2Interop.Extender(builder).setCaptureRequestOption(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                stabilizationMode
             )
         }
         return builder.build().also { it.targetRotation = rotation }
@@ -946,6 +964,18 @@ class XCameraController(
             } else {
                 CameraSelector.Builder().requireLensFacing(lensFacing).build()
             }
+            // Periksa metadata kamera terpilih sebelum menyusun use case. Di Android 13+,
+            // sebagian perangkat mungkin mengiklankan PREVIEW_STABILIZATION tanpa mode ON.
+            val selectedCameraInfo = try {
+                selector.filter(p.availableCameraInfos).firstOrNull()
+            } catch (e: Exception) {
+                null
+            }
+            reportedVideoStabilizationModes = selectedCameraInfo?.let {
+                readVideoStabilizationModes(it)
+            } ?: emptyList()
+            val requestedStabilizationMode = selectedCameraInfo?.let { supportedStabilizationMode(it) }
+
             val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
             currentRotation = rotation
 
@@ -954,7 +984,7 @@ class XCameraController(
             // Coba preview + foto + video sekaligus, lalu turunkan bila kombinasi tidak didukung.
             val lowerOk = videoQuality == Quality.UHD || videoQuality == Quality.FHD
             val base = buildList<Pair<Quality?, Boolean>> {
-                if (stabilizationOn) {
+                if (stabilizationOn && requestedStabilizationMode != null) {
                     add(Pair(videoQuality, true))
                     if (lowerOk) add(Pair(Quality.HD, true))
                 }
@@ -976,9 +1006,16 @@ class XCameraController(
             var boundStab = false
             var boundFps = 0
             for ((q, stab, fps) in attempts) {
-                val preview = Preview.Builder()
-                    .setTargetRotation(rotation)
-                    .build()
+                val previewBuilder = Preview.Builder().setTargetRotation(rotation)
+                if (stab && requestedStabilizationMode != null) {
+                    // Gunakan nilai yang sama pada Preview dan VideoCapture agar mode preview
+                    // stabilization tidak kalah oleh opsi request dari use case lain.
+                    Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
+                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                        requestedStabilizationMode
+                    )
+                }
+                val preview = previewBuilder.build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 val captureBuilder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -998,7 +1035,15 @@ class XCameraController(
                     )
                 }
                 val capture = captureBuilder.build()
-                val video = q?.let { buildVideo(it, rotation, stab, fps) }
+                val video = q?.let {
+                    buildVideo(
+                        it,
+                        rotation,
+                        stab,
+                        fps,
+                        requestedStabilizationMode ?: CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                    )
+                }
                 val group = UseCaseGroup.Builder()
                     .addUseCase(preview)
                     .addUseCase(capture)
@@ -1041,10 +1086,11 @@ class XCameraController(
                 emptyList()
             }
             effectiveQuality = resolveQuality(supportedQualities)
-            stabilizationActive = boundStab
+            activeStabilizationMode = supportedStabilizationMode(cam.cameraInfo)
+            stabilizationSupported = boundVideo != null && activeStabilizationMode != null
+            stabilizationActive = boundStab && stabilizationSupported
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
             effectiveFps = if (boundFps in supportedFps) boundFps else 0
-            stabilizationSupported = boundVideo != null && checkEisSupport(cam)
 
             zoomLiveData?.removeObserver(zoomObserver)
             val zoomState = cam.cameraInfo.zoomState
@@ -1110,13 +1156,32 @@ class XCameraController(
         if (videoFps != 0 && camera != null && !isRecording) bind(keepZoom = true)
     }
 
+    /**
+     * Return a native stabilization mode only when the active Camera2 metadata advertises it.
+     * Prefer PREVIEW_STABILIZATION on Android 13+ because it can stabilize preview and video
+     * together; fall back to the classic VIDEO_STABILIZATION_MODE_ON where that is supported.
+     * This does not invent or bypass a capability that the camera HAL does not expose.
+     */
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun checkEisSupport(cam: Camera): Boolean = try {
-        val modes = Camera2CameraInfo.from(cam.cameraInfo)
+    private fun readVideoStabilizationModes(info: CameraInfo): List<Int> = try {
+        Camera2CameraInfo.from(info)
             .getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-        modes != null && modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            ?.toList() ?: emptyList()
     } catch (e: Exception) {
-        false
+        emptyList()
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun supportedStabilizationMode(info: CameraInfo): Int? {
+        val modes = readVideoStabilizationModes(info)
+        return when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                modes?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION) == true ->
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
+            modes?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true ->
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            else -> null
+        }
     }
 
     /** Ukuran foto pilihan user ("WxH"), null = otomatis. */
