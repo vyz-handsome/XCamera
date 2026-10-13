@@ -81,7 +81,7 @@ class SettingsActivity : AppCompatActivity() {
             "Ukuran 4:3 yang didukung kamera belakang. Kamera depan memakai ukuran terdekat."
         )
         switchRow(
-            c, "Cerminkan foto kamera depan", "Hasil selfie sama seperti yang terlihat di preview.",
+            c, "Cerminkan hasil kamera depan", "Foto dan video selfie sama seperti yang terlihat di preview.",
             Prefs.MIRROR_FRONT, true
         )
 
@@ -90,6 +90,12 @@ class SettingsActivity : AppCompatActivity() {
         choiceRow(
             c, "Kualitas video", Prefs.VIDEO_QUALITY, "FHD", videoQualityOptions(),
             "Jika HP tidak mampu di kualitas ini, XCAM otomatis turun ke yang terdekat."
+        )
+        switchRow(
+            c, "Live Photo: foto asli", "Saat shutter, rekaman dijeda sebentar untuk mengambil foto biasa (kualitas penuh), lalu " +
+                "dilanjutkan. Videonya ada lompatan singkat di titik foto. Matikan untuk foto tanpa jeda " +
+                "(foto dijepret sambil video merekam).",
+            Prefs.LIVE_REAL_PHOTO, true
         )
         choiceRow(
             c, "Frame rate video (FPS)", Prefs.VIDEO_FPS, "auto", videoFpsOptions(),

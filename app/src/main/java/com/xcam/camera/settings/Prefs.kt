@@ -9,6 +9,7 @@ object Prefs {
 
     const val VIDEO_QUALITY = "video_quality"      // UHD | FHD | HD | SD
     const val LOOP_SECONDS = "loop_seconds"        // 15 | 30 | 60 | atau angka sendiri (5-180)
+    const val LIVE_REAL_PHOTO = "live_real_photo"  // boolean: Live Photo memakai foto asli (video jeda sebentar)
     const val VIDEO_FPS = "video_fps"              // auto | 24 | 30 | 60
     const val DEFAULT_CAMERA = "default_camera"    // back | front
     const val DEFAULT_FLASH = "default_flash"      // off | auto | on

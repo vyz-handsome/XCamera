@@ -102,6 +102,7 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         controller = XCameraController(this, binding.previewView, binding.previewFreeze)
             .also { it.listener = this }
         liveEngine = LivePhotoEngine(this, controller, liveCallback)
+        controller.onRotationChanged = { liveEngine.onOrientationChanged() }
         zoomControls = ZoomController(
             this, controller, binding.zoomBar, binding.zoomSliderPanel, binding.zoomSlider
         )
@@ -126,7 +127,7 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
             controller.cycleVideoFps()
             updateQualityUi()
         }
-        binding.btnStab.setOnClickListener { toggleEisForCurrentMode() }
+        binding.btnStab.setOnClickListener { controller.toggleStabilization() }
         // Tekan lama logo XCAM untuk melihat info lensa kamera (berguna kalau ultra-wide tidak terdeteksi).
         binding.tvBrand.setOnLongClickListener {
             AlertDialog.Builder(this)
@@ -312,8 +313,6 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
 
     private fun beginRecording(withAudio: Boolean) {
         val started = controller.startRecording(withAudio, object : XCameraController.RecordingCallback {
-            private var softwareEisFallback = false
-
             override fun onProgress(durationMs: Long) {
                 val sec = durationMs / 1000
                 if (sec != lastSecondShown) {
@@ -322,27 +321,13 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
                 }
             }
 
-            override fun onStabilizationStarted() {
-                if (isDestroyed) return
-                setRecordingUi(false)
-                Toast.makeText(this@MainActivity, "Video selesai; sedang distabilkan software…", Toast.LENGTH_SHORT).show()
-            }
-
-            override fun onStabilizationFallback() {
-                softwareEisFallback = true
-            }
-
             override fun onFinished(uri: Uri) {
                 if (isDestroyed) return
                 setRecordingUi(false)
                 lastMediaUri = uri
                 lastMediaIsVideo = true
                 loadThumbnail(uri, true)
-                Toast.makeText(
-                    this@MainActivity,
-                    if (softwareEisFallback) "Video tersimpan asli; stabilisasi software gagal" else getString(R.string.toast_video_saved),
-                    if (softwareEisFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
-                ).show()
+                Toast.makeText(this@MainActivity, R.string.toast_video_saved, Toast.LENGTH_SHORT).show()
             }
 
             override fun onFailed(message: String) {
@@ -381,8 +366,6 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
     }
 
     private val liveCallback = object : LivePhotoEngine.Callback {
-        private var softwareEisFallback = false
-
         override fun onCaptureStarted() {
             lockOrientation(true)
             animateShutter()
@@ -397,20 +380,10 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         override fun onLiveSaved(photoUri: Uri) {
             if (isDestroyed) return
             lockOrientation(false)
-            Toast.makeText(
-                this@MainActivity,
-                if (softwareEisFallback) "Live Photo tersimpan asli; stabilisasi software gagal" else getString(R.string.toast_live_saved),
-                if (softwareEisFallback) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
-            ).show()
-            softwareEisFallback = false
-        }
-
-        override fun onStabilizationFallback() {
-            softwareEisFallback = true
+            Toast.makeText(this@MainActivity, R.string.toast_live_saved, Toast.LENGTH_SHORT).show()
         }
 
         override fun onLiveFailed(message: String) {
-            softwareEisFallback = false
             if (isDestroyed) return
             lockOrientation(false)
             Toast.makeText(
@@ -541,42 +514,6 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         )
     }
 
-    /** EIS dipakai oleh video biasa dan klip video di dalam Live Photo. */
-    private fun toggleEisForCurrentMode() {
-        if (!::controller.isInitialized) return
-        if (mode == CameraMode.LIVE) {
-            if (liveEngine.isBusy) {
-                Toast.makeText(this, "Tunggu Live Photo selesai dulu", Toast.LENGTH_SHORT).show()
-                return
-            }
-            val queued = liveEngine.stopForReconfiguration {
-                val applied = controller.toggleStabilization()
-                updateQualityUi()
-                if (!applied) {
-                    Toast.makeText(
-                        this,
-                        if (controller.stabilizationOn) "EIS software tidak dapat diaktifkan sekarang" else "EIS software tidak dapat diubah sekarang",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-                ensureLiveBuffer()
-            }
-            if (!queued) {
-                Toast.makeText(this, "Buffer Live Photo belum siap diubah", Toast.LENGTH_SHORT).show()
-            }
-        } else {
-            val applied = controller.toggleStabilization()
-            updateQualityUi()
-            if (!applied) {
-                Toast.makeText(
-                    this,
-                    if (controller.stabilizationOn) "EIS software tidak dapat diaktifkan sekarang" else "EIS software tidak dapat diubah sekarang",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-    }
-
     private fun updateQualityUi() {
         val q = controller.effectiveQuality
         if (mode == CameraMode.VIDEO && q != null) {
@@ -588,15 +525,8 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         val fpsOk = mode == CameraMode.VIDEO && q != null && controller.supportedFps.isNotEmpty()
         binding.btnFps.visibility = if (fpsOk) View.VISIBLE else View.GONE
         if (fpsOk) binding.btnFps.text = controller.fpsLabel(controller.effectiveFps)
-        val showStab = (mode == CameraMode.VIDEO || mode == CameraMode.LIVE) &&
-            controller.stabilizationSupported
+        val showStab = mode == CameraMode.VIDEO && controller.stabilizationSupported
         binding.btnStab.visibility = if (showStab) View.VISIBLE else View.GONE
-        binding.btnStab.text = if (controller.stabilizationActive) "EIS SW ON" else "EIS SW OFF"
-        binding.btnStab.contentDescription = if (controller.stabilizationActive) {
-            "Stabilisasi video software aktif. Ketuk untuk mematikan"
-        } else {
-            "Stabilisasi video software mati. Ketuk untuk mengaktifkan"
-        }
         binding.btnStab.setTextColor(
             ContextCompat.getColor(
                 this,
@@ -677,6 +607,7 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         binding.shutterInner.setBackgroundResource(shutterBg())
         updateLiveUi()
         if (::controller.isInitialized) {
+            controller.setLiveStabilization(mode == CameraMode.LIVE)
             controller.setFpsSuspended(mode != CameraMode.VIDEO)
             updateFlashUi()
             updateQualityUi()

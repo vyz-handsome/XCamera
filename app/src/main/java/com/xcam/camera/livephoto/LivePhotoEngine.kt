@@ -6,7 +6,7 @@ import android.os.Looper
 import androidx.appcompat.app.AppCompatActivity
 import com.xcam.camera.camera.XCameraController
 import com.xcam.camera.gallery.MediaStoreHelper
-import com.xcam.camera.video.SoftwareVideoStabilizer
+import com.xcam.camera.settings.Prefs
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -39,15 +39,16 @@ class LivePhotoEngine(
         /** Foto sudah tersimpan (belum digabung video); dipakai untuk thumbnail cepat. */
         fun onStillSaved(photoUri: Uri)
         fun onUnsupported()
-        /** The original Live Photo clip was kept because software stabilization failed. */
-        fun onStabilizationFallback() {}
     }
 
-    private enum class State { OFF, ROLLING, ROTATING, CAPTURING, FINALIZING, STOPPING }
+    private enum class State {
+        OFF, ROLLING, ROTATING, CAPTURING, FINALIZING, STOPPING,
+        // Mode "foto asli": rekaman dihentikan saat shutter, foto diambil tanpa rekaman, lalu rekaman dilanjutkan.
+        REAL_STOP, REAL_PHOTO, REAL_POST, REAL_POST_STOP
+    }
 
     private val handler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
-    private val afterBufferStopped = mutableListOf<() -> Unit>()
 
     private var state = State.OFF
     private var wantRolling = false
@@ -67,6 +68,11 @@ class LivePhotoEngine(
     private var endTargetMs = 0L
     private var discard = false
 
+    // Data mode "foto asli"
+    private var segA: File? = null
+    private var segAEndMs = 0L
+    private var postTargetMs = 0L
+
     private val captureTimeout = Runnable { failCapture("waktu habis") }
     private val retryStart = Runnable {
         if (state == State.OFF && wantRolling) startSegment()
@@ -79,7 +85,8 @@ class LivePhotoEngine(
         }
     }
 
-    val isBusy: Boolean get() = state == State.CAPTURING || state == State.FINALIZING
+    val isBusy: Boolean get() = state == State.CAPTURING || state == State.FINALIZING ||
+        state == State.REAL_STOP || state == State.REAL_PHOTO || state == State.REAL_POST || state == State.REAL_POST_STOP
 
     fun start(withAudio: Boolean) {
         this.withAudio = withAudio
@@ -98,43 +105,27 @@ class LivePhotoEngine(
         }
     }
 
-    /**
-     * Hentikan segmen Live Photo yang sedang berjalan sebelum mengganti konfigurasi kamera.
-     * Callback berjalan di main thread setelah file buffer ditutup dan controller bebas di-bind ulang.
-     * Mengembalikan false jika Live Photo sedang menangkap/memfinalisasi foto.
-     */
-    fun stopForReconfiguration(afterStopped: () -> Unit): Boolean {
-        if (isBusy) return false
-        wantRolling = false
-        handler.removeCallbacks(retryStart)
-        afterBufferStopped.add(afterStopped)
-        when (state) {
-            State.OFF -> dispatchAfterBufferStopped()
-            State.ROLLING -> {
-                state = State.STOPPING
-                controller.stopFileRecording()
-            }
-            // ROTATING/STOPPING: segmen sudah diminta berhenti, tunggu callback finalnya.
-            State.ROTATING, State.STOPPING -> Unit
-            else -> {
-                afterBufferStopped.remove(afterStopped)
-                return false
-            }
-        }
-        return true
-    }
-
-    private fun dispatchAfterBufferStopped() {
-        if (state != State.OFF || afterBufferStopped.isEmpty()) return
-        val callbacks = afterBufferStopped.toList()
-        afterBufferStopped.clear()
-        callbacks.forEach { callback -> callback() }
-    }
-
     fun release() {
         stop()
         handler.removeCallbacksAndMessages(null)
         io.shutdown()
+    }
+
+    private val rotateRestart = Runnable {
+        if (wantRolling && state == State.ROLLING) {
+            state = State.ROTATING
+            controller.stopFileRecording()
+        }
+    }
+
+    /**
+     * HP diputar: segmen yang sedang direkam masih membawa orientasi lama, jadi videonya bisa miring
+     * dibanding foto yang diambil dengan orientasi baru. Buffer dimulai ulang (ditunda sebentar supaya
+     * tidak terpancing goyangan di batas orientasi). Pengambilan yang sedang berjalan tidak disentuh.
+     */
+    fun onOrientationChanged() {
+        handler.removeCallbacks(rotateRestart)
+        handler.postDelayed(rotateRestart, 600L)
     }
 
     /** Kamera di-bind ulang (ganti lensa/kualitas): rekaman lama mati, mulai lagi jika perlu. */
@@ -181,6 +172,10 @@ class LivePhotoEngine(
                     controller.stopFileRecording()
                 }
                 State.CAPTURING -> if (photoSaved && durationMs >= endTargetMs) finishCapture()
+                State.REAL_POST -> if (durationMs >= postTargetMs) {
+                    state = State.REAL_POST_STOP
+                    controller.stopFileRecording()
+                }
                 else -> {}
             }
         }
@@ -212,7 +207,6 @@ class LivePhotoEngine(
                     file?.delete()
                     callback.onLiveFailed("rekaman video tidak lengkap")
                 }
-                dispatchAfterBufferStopped()
             }
             State.CAPTURING -> {
                 // Rekaman mati sebelum selesai (mis. kamera terganggu). Foto tetap ada sebagai foto biasa.
@@ -222,13 +216,36 @@ class LivePhotoEngine(
                 controller.lensLocked = false
                 callback.onLiveFailed("rekaman terputus")
                 if (wantRolling) handler.postDelayed(retryStart, 400)
-                dispatchAfterBufferStopped()
+            }
+            State.REAL_STOP -> {
+                // Buffer sebelum shutter sudah lengkap. Sekarang ambil foto asli (tanpa rekaman berjalan).
+                segAEndMs = lastPosMs
+                segA = if (valid) file else { file?.delete(); null }
+                state = State.REAL_PHOTO
+                takeRealPhoto()
+            }
+            State.REAL_POST, State.REAL_POST_STOP -> {
+                handler.removeCallbacks(captureTimeout)
+                val a = segA
+                segA = null
+                val aEnd = segAEndMs
+                val uri = photoUri
+                photoUri = null
+                state = State.OFF
+                controller.lensLocked = false
+                if (wantRolling) startSegment()
+                if (file != null && uri != null && valid) {
+                    processReal(a, aEnd, file, uri)
+                } else {
+                    a?.delete()
+                    file?.delete()
+                    callback.onLiveFailed("rekaman sesudah foto tidak lengkap")
+                }
             }
             State.ROTATING -> {
                 file?.delete()
                 state = State.OFF
                 if (wantRolling) startSegment()
-                dispatchAfterBufferStopped()
             }
             else -> {
                 // ROLLING (mati sendiri), STOPPING, OFF
@@ -239,7 +256,6 @@ class LivePhotoEngine(
                     handler.removeCallbacks(retryStart)
                     handler.postDelayed(retryStart, 400)
                 }
-                dispatchAfterBufferStopped()
             }
         }
     }
@@ -267,6 +283,10 @@ class LivePhotoEngine(
     }
 
     private fun beginCapture(total: Long) {
+        if (Prefs.of(activity).getBoolean(Prefs.LIVE_REAL_PHOTO, true)) {
+            beginRealCapture(total)
+            return
+        }
         state = State.CAPTURING
         totalMs = total
         pivotMs = lastPosMs
@@ -300,6 +320,88 @@ class LivePhotoEngine(
         handler.postDelayed(captureTimeout, totalMs + 15_000L)
     }
 
+    // ---- Mode "foto asli": rekaman berhenti sebentar supaya foto diambil lewat jalur foto biasa
+
+    private fun beginRealCapture(total: Long) {
+        state = State.REAL_STOP
+        totalMs = total
+        postTargetMs = maxOf(total - PRE_MS, POST_MIN_MS)
+        photoSaved = false
+        photoUri = null
+        discard = false
+        segA = null
+        controller.lensLocked = true
+        callback.onCaptureStarted()
+        handler.removeCallbacks(captureTimeout)
+        handler.postDelayed(captureTimeout, total + 20_000L)
+        controller.stopFileRecording() // lanjut di onSegmentEnded(REAL_STOP)
+    }
+
+    private fun takeRealPhoto() {
+        val base = MediaStoreHelper.LIVE_PREFIX +
+            SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(System.currentTimeMillis()) + "_MP"
+        val ok = controller.takePhotoLiveFlash(
+            onSaved = { uri ->
+                if (state == State.REAL_PHOTO) {
+                    photoUri = uri
+                    photoSaved = true
+                    callback.onStillSaved(uri)
+                    startPostRecording()
+                }
+            },
+            onError = { msg -> failCapture(msg) },
+            baseName = base
+        )
+        if (!ok) failCapture("kamera sedang sibuk")
+    }
+
+    private fun startPostRecording() {
+        val f = File(activity.cacheDir, "live_post_${System.nanoTime()}.mp4")
+        val ok = controller.startFileRecording(f, withAudio, recordingCallback)
+        if (!ok) {
+            failCapture("rekaman sesudah foto gagal dimulai")
+            return
+        }
+        currentFile = f
+        lastPosMs = 0L
+        state = State.REAL_POST
+    }
+
+    private fun processReal(a: File?, aEndMs: Long, b: File, photo: Uri) {
+        val job = Runnable {
+            val joined = File(activity.cacheDir, "live_join_${System.nanoTime()}.mp4")
+            var success = false
+            try {
+                val presentationUs: Long
+                if (a != null) {
+                    val startMs = maxOf(0L, aEndMs - PRE_MS)
+                    presentationUs = VideoTrimmer.trimAndJoin(a, b, joined, startMs * 1000L)
+                } else {
+                    // Tidak ada rekaman sebelum shutter (buffer baru berputar): video hanya berisi bagian sesudah foto.
+                    presentationUs = if (VideoTrimmer.trimStart(b, joined, 0L) >= 0) 0L else -1L
+                }
+                if (presentationUs >= 0 && joined.length() > 0) {
+                    success = MotionPhotoWriter.combine(activity, photo, joined, presentationUs)
+                }
+            } catch (e: Exception) {
+                success = false
+            } finally {
+                a?.delete()
+                b.delete()
+                joined.delete()
+            }
+            handler.post {
+                if (success) callback.onLiveSaved(photo) else callback.onLiveFailed("gagal menggabungkan video")
+            }
+        }
+        try {
+            io.execute(job)
+        } catch (e: RejectedExecutionException) {
+            a?.delete()
+            b.delete()
+        }
+    }
+
     private fun finishCapture() {
         if (state != State.CAPTURING) return
         handler.removeCallbacks(captureTimeout)
@@ -308,6 +410,23 @@ class LivePhotoEngine(
     }
 
     private fun failCapture(message: String) {
+        if (state == State.REAL_STOP || state == State.REAL_PHOTO || state == State.REAL_POST || state == State.REAL_POST_STOP) {
+            handler.removeCallbacks(captureTimeout)
+            callback.onLiveFailed(message)
+            segA?.delete()
+            segA = null
+            val wasRecording = state == State.REAL_POST || state == State.REAL_POST_STOP || state == State.REAL_STOP
+            state = State.STOPPING
+            controller.lensLocked = false
+            if (wasRecording) controller.stopFileRecording()
+            handler.postDelayed({
+                if (state == State.STOPPING) {
+                    state = State.OFF
+                    if (wantRolling) startSegment()
+                }
+            }, 2000)
+            return
+        }
         if (state != State.CAPTURING) return
         handler.removeCallbacks(captureTimeout)
         callback.onLiveFailed(message)
@@ -328,36 +447,23 @@ class LivePhotoEngine(
     private fun process(file: File, photo: Uri, pivot: Long, saved: Long) {
         val job = Runnable {
             val trimmed = File(activity.cacheDir, "live_trim_${System.nanoTime()}.mp4")
-            val stabilized = File(activity.cacheDir, "live_eis_${System.nanoTime()}.mp4")
             var success = false
-            var stabilizationFallback = false
             try {
                 val startMs = maxOf(0L, pivot - PRE_MS)
                 val baseUs = VideoTrimmer.trimStart(file, trimmed, startMs * 1000L)
                 if (baseUs >= 0 && trimmed.length() > 0) {
-                    var finalClip = trimmed
-                    if (controller.stabilizationOn) {
-                        if (SoftwareVideoStabilizer.stabilize(trimmed, stabilized)) {
-                            finalClip = stabilized
-                        } else {
-                            // Do not discard the Live Photo if encoding fails; retain original clip.
-                            stabilizationFallback = true
-                        }
-                    }
                     // Perkiraan saat foto diambil: sedikit sebelum foto selesai disimpan.
                     val stillMs = maxOf(pivot, saved - STILL_LATENCY_MS)
                     val presentationUs = maxOf(0L, stillMs * 1000L - baseUs)
-                    success = MotionPhotoWriter.combine(activity, photo, finalClip, presentationUs)
+                    success = MotionPhotoWriter.combine(activity, photo, trimmed, presentationUs)
                 }
             } catch (e: Exception) {
                 success = false
             } finally {
                 file.delete()
                 trimmed.delete()
-                stabilized.delete()
             }
             handler.post {
-                if (stabilizationFallback) callback.onStabilizationFallback()
                 if (success) callback.onLiveSaved(photo) else callback.onLiveFailed("gagal menggabungkan video")
             }
         }

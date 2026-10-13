@@ -9,7 +9,7 @@ val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
 
 android {
     namespace = "com.xcam.camera"
-    compileSdk = 35
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.xcam.camera"
@@ -31,7 +31,7 @@ android {
 
     buildTypes {
         debug {
-            // Use Android's generated debug key in GitHub Actions; no private keystore required.
+            signingConfig = signingConfigs.getByName("xcam")
         }
         release {
             isMinifyEnabled = false
@@ -66,7 +66,4 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-video:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
-
-    // LGPL FFmpeg build. Its built-in deshake filter provides software stabilization after capture.
-    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full:6.0.3")
 }

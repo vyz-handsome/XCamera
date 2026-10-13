@@ -21,11 +21,9 @@ Tips: tekan lama logo "XCAM" di layar kamera untuk melihat info lensa yang terde
 - Tahap 8f: pengaturan kualitas foto Live (8e) dibatalkan karena hasil foto jadi hitam. Info Lensa menampilkan ukuran foto yang dipakai.
 
 - Tahap 8g: flash tetap bisa dipakai di lensa ultra-wide 0,5x (lampu dipinjam dari kamera utama lewat torch) untuk foto, Live Photo, dan senter video.
-- Tahap 8h: EIS bisa diaktifkan dari mode Video maupun LIVE. Stabilisasi diterapkan pada VideoCapture yang juga merekam klip video di dalam Live Photo; saat pengaturan diganti, buffer dihentikan dan dimulai ulang dengan aman. Indikator menampilkan status EIS yang benar-benar aktif.
 
+- Tahap 8h: EIS dinyalakan bawaan (bisa dimatikan lewat tombol di mode Video) dan selalu dipakai di mode Live Photo untuk bagian videonya. Pakai PREVIEW_STABILIZATION (gyro, Android 13+) jika didukung kamera, otomatis kembali ke EIS biasa kalau HP menolaknya. Foto Live Photo kini diambil sebagai foto asli: rekaman dijeda saat shutter, foto diambil lewat jalur foto biasa, lalu rekaman dilanjutkan dan disambung (bisa dimatikan di Settings: "Live Photo: foto asli").
 
-## Software EIS (Tahap 9)
+- Tahap 8i: info lensa menampilkan mode EIS/OIS yang dilaporkan tiap kamera belakang. OIS ikut dinyalakan saat merekam video jika kamera punya; tombol EIS muncul jika EIS atau OIS didukung.
 
-Tombol **EIS SW** menjalankan stabilisasi software setelah rekaman video selesai, memakai filter FFmpeg `deshake`. Hasil video stabil ditulis sebagai file baru di `Movies/XCamera`; file asli baru dihapus setelah hasil sukses ditulis. Untuk Live Photo, klip MP4 diproses sebelum ditempel ke JPEG. Jika proses gagal, XCam mempertahankan file asli dan memberi tahu pengguna. Karena ini post-processing, stabilisasi tidak berlaku pada preview langsung dan perlu waktu pemrosesan tambahan.
-
-Integrasi FFmpeg memakai paket `dev.ffmpegkit-maintained:ffmpeg-kit-full:6.0.3` (LGPL-3.0). Teks lisensi dan sumber pustaka tersedia di [repositori FFmpegKit Maintained](https://github.com/ffmpegkit-maintained/ffmpeg).
+- Tahap 8j: perbaikan kompilasi tahap 8i (fungsi hasOis dan teks diagnostik EIS/OIS ditulis ulang dengan sintaks yang lebih aman).
