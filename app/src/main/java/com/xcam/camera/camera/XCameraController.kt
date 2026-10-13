@@ -236,6 +236,8 @@ class XCameraController(
     private var lastLensSwitch = 0L
     private var boundPhotoSize = "auto"
     private var boundEisMode = "auto"
+    /** Nilai CONTROL_VIDEO_STABILIZATION_MODE yang diminta: 1 = ON, 2 = PREVIEW_STABILIZATION (Android 13+). */
+    private var hwModeValue = 1
 
     // EIS software: satu pemroses GL dipakai ulang di setiap bind.
     private var softProcessor: SoftEisProcessor? = null
@@ -775,6 +777,12 @@ class XCameraController(
             }
         )
         sb.append("\nMode EIS: ").append(eisMode())
+        try {
+            val modes = Camera2CameraInfoModes(cam)
+            sb.append("\nMode stabilisasi yang ditawarkan kamera: ").append(modes)
+        } catch (e: Exception) {
+        }
+        if (hwStabRequested) sb.append("\nMode hardware yang diminta: ").append(if (hwModeValue == 2) "PREVIEW_STABILIZATION" else "ON")
         if (hwStabRequested) sb.append("\nEIS hardware dilaporkan kamera: ").append(if (hwStabReported) "ya" else "tidak")
         softProcessor?.let {
             sb.append("\nEIS software: ").append(it.status)
@@ -962,7 +970,7 @@ class XCameraController(
             val ext = Camera2Interop.Extender(builder)
             ext.setCaptureRequestOption(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                hwModeValue
             )
             // Cek apakah kamera benar-benar menyalakan EIS hardware (banyak HP menolaknya untuk app pihak ketiga).
             ext.setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
@@ -971,8 +979,7 @@ class XCameraController(
                     request: CaptureRequest,
                     result: TotalCaptureResult
                 ) {
-                    hwStabReported = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE) ==
-                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                    hwStabReported = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE) == hwModeValue
                 }
             })
         }
@@ -1014,7 +1021,8 @@ class XCameraController(
             // Coba preview + foto + video sekaligus, lalu turunkan bila kombinasi tidak didukung.
             val lowerOk = videoQuality == Quality.UHD || videoQuality == Quality.FHD
             val mode = eisMode()
-            val hwOk = mode != "soft" && hwEisAvailable(p, selector)
+            hwModeValue = if (mode != "soft") hwEisModeFor(p, selector) else 0
+            val hwOk = hwModeValue != 0
             val softOk = mode != "hw" && gyroPresent()
             val base = buildList<EisAttempt> {
                 if (stabilizationOn && (hwOk || softOk)) {
@@ -1195,19 +1203,37 @@ class XCameraController(
         if (videoFps != 0 && camera != null && !isRecording) bind(keepZoom = true)
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun Camera2CameraInfoModes(cam: Camera?): String {
+        val m = cam?.let {
+            Camera2CameraInfo.from(it.cameraInfo)
+                .getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+        } ?: return "tidak terbaca"
+        return m.joinToString { when (it) { 0 -> "OFF"; 1 -> "ON"; 2 -> "PREVIEW"; else -> it.toString() } }
+    }
+
     private class EisAttempt(val q: Quality?, val hw: Boolean, val soft: Boolean, val fps: Int = 0)
 
-    /** Kamera yang akan dipilih [selector] mendukung EIS hardware (mode ON) menurut karakteristiknya. */
+    /**
+     * Mode EIS hardware yang bisa diminta app pihak ketiga pada kamera pilihan [selector]:
+     * 2 (PREVIEW_STABILIZATION, Android 13+) diutamakan karena itu yang biasanya diizinkan HP,
+     * lalu 1 (ON). 0 = tidak ada.
+     */
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun hwEisAvailable(p: ProcessCameraProvider, selector: CameraSelector): Boolean = try {
+    private fun hwEisModeFor(p: ProcessCameraProvider, selector: CameraSelector): Int = try {
         val info = selector.filter(p.availableCameraInfos).firstOrNull()
         val modes = info?.let {
             Camera2CameraInfo.from(it)
                 .getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
         }
-        modes != null && modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        when {
+            modes == null -> 0
+            Build.VERSION.SDK_INT >= 33 && modes.contains(2) -> 2
+            modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) -> 1
+            else -> 0
+        }
     } catch (e: Exception) {
-        false
+        0
     }
 
     /** Isi data kamera aktif (orientasi sensor, FOV, basis waktu) ke pemroses EIS software. */
@@ -1247,7 +1273,8 @@ class XCameraController(
     private fun checkEisSupport(cam: Camera): Boolean = try {
         val modes = Camera2CameraInfo.from(cam.cameraInfo)
             .getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-        modes != null && modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        modes != null && (modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) ||
+            (Build.VERSION.SDK_INT >= 33 && modes.contains(2)))
     } catch (e: Exception) {
         false
     }
