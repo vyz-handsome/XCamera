@@ -134,6 +134,12 @@ class XCameraController(
         private set
     /** FPS hanya berlaku di mode Video. Di mode Foto dan Live Photo kamera memakai FPS otomatis. */
     private var fpsSuspended = true
+    /**
+     * Video ikut di-bind hanya di mode Video dan Live. Di mode Foto kamera di-bind cuma Preview + ImageCapture,
+     * supaya foto memakai resolusi penuh sensor (ukuran foto tidak ikut dibatasi stream video).
+     */
+    var videoEnabled: Boolean = false
+        private set
     var supportedQualities: List<Quality> = emptyList()
         private set
     var effectiveQuality: Quality? = null
@@ -242,6 +248,10 @@ class XCameraController(
     // EIS software: satu pemroses GL dipakai ulang di setiap bind.
     private var softProcessor: SoftEisProcessor? = null
     private var softEffect: SoftEisEffect? = null
+    private fun liveHiStill(): Boolean = prefs.getBoolean(Prefs.LIVE_HI_STILL, false)
+    private fun eisPreview(): Boolean = prefs.getBoolean(Prefs.EIS_PREVIEW, false)
+    private fun eisFlip(): Int = (prefs.getString(Prefs.EIS_FLIP, "0")?.toIntOrNull() ?: 0).coerceIn(0, 7)
+    private fun eisCfgKey(): String = eisMode() + "/" + eisPreview() + "/" + eisFlip()
     private fun softProc(): SoftEisProcessor {
         val p = softProcessor ?: SoftEisProcessor(activity).also { softProcessor = it }
         return p
@@ -764,7 +774,7 @@ class XCameraController(
         if (state != null) {
             sb.append(String.format(Locale.US, "\nZoom asli lensa aktif: %.2fx - %.2fx", state.minZoomRatio, state.maxZoomRatio))
         }
-        sb.append("\nVideo: ").append(if (videoAvailable) "tersedia" else "tidak tersedia bareng preview")
+        sb.append("\nVideo: ").append(if (!videoEnabled) "tidak dipasang di mode Foto (foto resolusi penuh)" else if (videoAvailable) "tersedia" else "tidak tersedia bareng preview")
         val still = try { imageCapture?.resolutionInfo?.resolution } catch (e: Exception) { null }
         sb.append("\nUkuran foto saat ini: ").append(if (still != null) "${still.width}x${still.height}" else "belum diketahui")
         sb.append("\nEIS: ").append(
@@ -786,7 +796,10 @@ class XCameraController(
         if (hwStabRequested) sb.append("\nEIS hardware dilaporkan kamera: ").append(if (hwStabReported) "ya" else "tidak")
         softProcessor?.let {
             sb.append("\nEIS software: ").append(it.status)
-            sb.append("\nFrame diproses/dikoreksi: ").append(it.framesTotal).append(" / ").append(it.framesCorrected)
+            sb.append("\nFrame diproses/dikoreksi/timestamp tak cocok: ").append(it.framesTotal).append(" / ")
+                .append(it.framesCorrected).append(" / ").append(it.framesMismatch)
+            sb.append("\nSampel gyro: ").append(it.gyroSamples)
+            if (it.diag.isNotEmpty()) sb.append("\n").append(it.diag)
         }
         sb.append(cameraDiagnostics())
         return sb.toString()
@@ -1024,7 +1037,10 @@ class XCameraController(
             hwModeValue = if (mode != "soft") hwEisModeFor(p, selector) else 0
             val hwOk = hwModeValue != 0
             val softOk = mode != "hw" && gyroPresent()
-            val base = buildList<EisAttempt> {
+            val base = if (!videoEnabled) {
+                // Mode Foto: tanpa video sama sekali -> foto resolusi penuh seperti kamera bawaan.
+                listOf(EisAttempt(null, false, false))
+            } else buildList<EisAttempt> {
                 if (stabilizationOn && (hwOk || softOk)) {
                     // Hardware (jika ada) + software sebagai cadangan; software hanya bekerja bila
                     // kamera tidak melaporkan EIS hardware menyala.
@@ -1040,11 +1056,18 @@ class XCameraController(
                 add(EisAttempt(null, false, false))
             }
             // FPS dicoba dulu di kualitas yang sama; kalau kombinasi gagal, FPS dilepas sebelum kualitas diturunkan.
+            // Bersama video, foto resolusi tertinggi dicoba dulu hanya jika "Foto Live resolusi tinggi" aktif; kalau kombinasi stream tidak
+            // didukung kamera, baru turun ke ukuran foto standar.
             val fpsTarget = if (videoFps > 0 && !fpsSuspended) videoFps else 0
             val attempts = buildList<EisAttempt> {
+                val hi = liveHiStill()
                 for (b in base) {
-                    if (fpsTarget > 0 && b.q != null) add(EisAttempt(b.q, b.hw, b.soft, fpsTarget))
-                    add(EisAttempt(b.q, b.hw, b.soft, 0))
+                    if (fpsTarget > 0 && b.q != null) {
+                        if (hi) add(EisAttempt(b.q, b.hw, b.soft, fpsTarget, true))
+                        add(EisAttempt(b.q, b.hw, b.soft, fpsTarget, false))
+                    }
+                    if ((hi && b.q != null) || !videoEnabled) add(EisAttempt(b.q, b.hw, b.soft, 0, true))
+                    add(EisAttempt(b.q, b.hw, b.soft, 0, false))
                 }
             }
             var bound: Camera? = null
@@ -1061,19 +1084,31 @@ class XCameraController(
                     .build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 val captureBuilder = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .setCaptureMode(
+                        if (!videoEnabled) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                        else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                    )
                     .setFlashMode(flashMode)
                     .setTargetRotation(rotation)
-                photoSizeFromPrefs()?.let { size ->
+                val userSize = photoSizeFromPrefs()
+                if (userSize != null) {
                     captureBuilder.setResolutionSelector(
                         ResolutionSelector.Builder()
                             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                             .setResolutionStrategy(
                                 ResolutionStrategy(
-                                    size,
+                                    userSize,
                                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                                 )
                             )
+                            .build()
+                    )
+                } else if (at.stillHi) {
+                    // Otomatis: ambil ukuran foto terbesar yang tersedia (bukan ukuran video).
+                    captureBuilder.setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                            .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
                             .build()
                     )
                 }
@@ -1081,7 +1116,10 @@ class XCameraController(
                 hwStabReported = false
                 val video = q?.let { buildVideo(it, rotation, at.hw, fps) }
                 val effect: SoftEisEffect? = if (at.soft && video != null) {
-                    softEffect ?: SoftEisEffect(softProc()).also { softEffect = it }
+                    val wantPreview = eisPreview()
+                    val cached = softEffect
+                    if (cached != null && cached.withPreview == wantPreview) cached
+                    else SoftEisEffect(softProc(), wantPreview).also { softEffect = it }
                 } else {
                     null
                 }
@@ -1132,7 +1170,7 @@ class XCameraController(
             hwStabRequested = boundHw
             softStabActive = boundSoft
             stabilizationActive = boundHw || boundSoft
-            boundEisMode = mode
+            boundEisMode = eisCfgKey()
             if (boundSoft) configureSoftEis(cam)
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
             effectiveFps = if (boundFps in supportedFps) boundFps else 0
@@ -1194,13 +1232,16 @@ class XCameraController(
     }
 
     /**
-     * Mode Foto dan Live Photo memakai FPS otomatis (Live Photo tetap ringan dan konsisten);
-     * pilihan FPS hanya aktif di mode Video. Bind ulang hanya terjadi jika FPS dipilih (bukan otomatis).
+     * Atur kamera sesuai mode. [video] = mode Video/Live (VideoCapture ikut di-bind). [suspendFps] = FPS pilihan
+     * hanya berlaku di mode Video; Foto dan Live memakai FPS otomatis. Bind ulang cuma sekali bila ada yang berubah.
      */
-    fun setFpsSuspended(suspended: Boolean) {
-        if (fpsSuspended == suspended) return
-        fpsSuspended = suspended
-        if (videoFps != 0 && camera != null && !isRecording) bind(keepZoom = true)
+    fun configureForMode(video: Boolean, suspendFps: Boolean) {
+        val videoChanged = videoEnabled != video
+        val fpsChanged = fpsSuspended != suspendFps
+        videoEnabled = video
+        fpsSuspended = suspendFps
+        if (camera == null || isRecording) return
+        if (videoChanged || (fpsChanged && videoFps != 0 && video)) bind(keepZoom = true)
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -1212,7 +1253,7 @@ class XCameraController(
         return m.joinToString { when (it) { 0 -> "OFF"; 1 -> "ON"; 2 -> "PREVIEW"; else -> it.toString() } }
     }
 
-    private class EisAttempt(val q: Quality?, val hw: Boolean, val soft: Boolean, val fps: Int = 0)
+    private class EisAttempt(val q: Quality?, val hw: Boolean, val soft: Boolean, val fps: Int = 0, val stillHi: Boolean = false)
 
     /**
      * Mode EIS hardware yang bisa diminta app pihak ketiga pada kamera pilihan [selector]:
@@ -1266,6 +1307,7 @@ class XCameraController(
             proc.setCamera(null)
         }
         proc.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
+        proc.setFlip(eisFlip())
         proc.bypassProvider = { hwStabRequested && hwStabReported }
     }
 
@@ -1300,7 +1342,7 @@ class XCameraController(
         val fpsChanged = fps != videoFps
         if (fpsChanged) videoFps = fps
         softProcessor?.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
-        val eisChanged = eisMode() != boundEisMode && stabilizationOn && recording == null
+        val eisChanged = eisCfgKey() != boundEisMode && stabilizationOn && recording == null
         if (qualityChanged || now != boundPhotoSize || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
     }
 

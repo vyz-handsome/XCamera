@@ -147,6 +147,9 @@ class GyroTracker(context: Context) : SensorEventListener {
     @Volatile var sampleCount = 0L
         private set
 
+    /** Uji kalibrasi: bit 0/1/2 membalik tanda sumbu X/Y/Z kamera pada kecepatan sudut. */
+    @Volatile var flipMask = 0
+
     /** @param cameraAxes 9 angka: sumbu X, Y, Z kamera dinyatakan dalam koordinat perangkat. */
     fun start(cameraAxes: DoubleArray): Boolean {
         val s = sensor ?: return false
@@ -191,11 +194,15 @@ class GyroTracker(context: Context) : SensorEventListener {
             val cx = wx * axes[0] + wy * axes[1] + wz * axes[2]
             val cy = wx * axes[3] + wy * axes[4] + wz * axes[5]
             val cz = wx * axes[6] + wy * axes[7] + wz * axes[8]
-            val mag = sqrt(cx * cx + cy * cy + cz * cz)
+            val fm = flipMask
+            val fx = if (fm and 1 != 0) -cx else cx
+            val fy = if (fm and 2 != 0) -cy else cy
+            val fz = if (fm and 4 != 0) -cz else cz
+            val mag = sqrt(fx * fx + fy * fy + fz * fz)
             val theta = mag * dt
             if (theta > 1e-9) {
                 val s = sin(theta / 2) / mag
-                val dq = doubleArrayOf(cos(theta / 2), cx * s, cy * s, cz * s)
+                val dq = doubleArrayOf(cos(theta / 2), fx * s, fy * s, fz * s)
                 q = Quat.normalize(Quat.mul(q, dq)) // rotasi di bingkai badan: kanan-kali
             }
             push(t)
@@ -314,6 +321,13 @@ class SoftEisProcessor(context: Context) : SurfaceProcessor {
     @Volatile var status = "belum dipakai"
         private set
 
+    @Volatile var framesMismatch = 0L
+        private set
+    @Volatile var diag = ""
+        private set
+    val gyroSamples: Long get() = gyro.sampleCount
+
+    fun setFlip(mask: Int) { gyro.flipMask = mask }
     fun setCamera(c: SoftEisCamera?) { cam = c }
     fun setNativeZoom(z: Float) { nativeZoom = z.coerceAtLeast(0.1f) }
     fun setStrength(strong: Boolean) {
@@ -480,6 +494,7 @@ class SoftEisProcessor(context: Context) : SurfaceProcessor {
         val r = gyro.orientationAt(t, qa)
         if (r != 0) {
             invalidStreak++
+            framesMismatch++
             status = if (r < 0) "menunggu data gyro" else "timestamp frame tidak cocok dengan gyro"
             if (invalidStreak > 15) resetFilter()
             return
@@ -530,6 +545,10 @@ class SoftEisProcessor(context: Context) : SurfaceProcessor {
         Quat.toMat3(Quat.fromRotVec(doubleArrayOf(ox, oy, oz)), rot)
         correctionOn = true
         framesCorrected++
+        diag = String.format(
+            java.util.Locale.US, "buffer %dx%d, tan %.2f/%.2f, zoom %.2f, koreksi x%.1f y%.1f z%.1f derajat, crop %.2f",
+            inW, inH, tanX, tanY, nativeZoom, Math.toDegrees(ox), Math.toDegrees(oy), Math.toDegrees(oz), cropZoom
+        )
         status = "aktif"
     }
 
@@ -717,8 +736,8 @@ void main() {
 }
 
 /** Efek CameraX yang memasang [SoftEisProcessor] pada VideoCapture saja. */
-class SoftEisEffect(processor: SoftEisProcessor) : CameraEffect(
-    CameraEffect.VIDEO_CAPTURE,
+class SoftEisEffect(processor: SoftEisProcessor, val withPreview: Boolean) : CameraEffect(
+    if (withPreview) (CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE) else CameraEffect.VIDEO_CAPTURE,
     processor.executor,
     processor,
     Consumer<Throwable> { t -> Log.e(TAG, "efek EIS error", t) }

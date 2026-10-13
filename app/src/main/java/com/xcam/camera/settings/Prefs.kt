@@ -17,6 +17,9 @@ object Prefs {
     const val SHOW_GRID = "show_grid"              // boolean
     const val EIS_MODE = "eis_mode"                // auto | soft | hw
     const val EIS_STRENGTH = "eis_strength"        // normal | strong (EIS software)
+    const val EIS_PREVIEW = "eis_preview"          // boolean: preview ikut diproses EIS software (uji)
+    const val EIS_FLIP = "eis_flip"                // 0..7: kalibrasi arah sumbu EIS software (uji)
+    const val LIVE_HI_STILL = "live_hi_still"      // boolean: foto Live minta resolusi terbesar (uji)
     const val ZOOM_SMOOTH = "zoom_smooth"          // fast | normal | soft
     const val ZOOM_SLIDER_ON_PINCH = "zoom_slider_pinch" // boolean
 

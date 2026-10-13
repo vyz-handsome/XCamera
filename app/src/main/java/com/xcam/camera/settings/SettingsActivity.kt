@@ -117,6 +117,29 @@ class SettingsActivity : AppCompatActivity() {
             "Kuat meredam getaran lebih banyak tetapi bidang pandang video lebih sempit."
         )
 
+        switchRow(
+            c, "Foto Live resolusi tinggi (uji)", "Foto di dalam Live Photo minta ukuran sebesar mungkin (jepretan shutter asli, bukan frame video). Kalau HP tidak mendukung bareng video, otomatis turun ke ukuran standar. Berlaku setelah ganti mode atau buka ulang kamera.",
+            Prefs.LIVE_HI_STILL, false
+        )
+        switchRow(
+            c, "Pratinjau EIS (uji)", "Preview ikut distabilkan EIS software supaya hasilnya bisa dilihat langsung tanpa merekam. Berlaku setelah kamera dibuka ulang.",
+            Prefs.EIS_PREVIEW, false
+        )
+        choiceRow(
+            c, "Kalibrasi arah EIS (uji)", Prefs.EIS_FLIP, "0",
+            listOf(
+                Option("0", "0: normal"),
+                Option("1", "1: balik sumbu X"),
+                Option("2", "2: balik sumbu Y"),
+                Option("3", "3: balik X dan Y"),
+                Option("4", "4: balik sumbu Z"),
+                Option("5", "5: balik X dan Z"),
+                Option("6", "6: balik Y dan Z"),
+                Option("7", "7: balik X, Y, dan Z")
+            ),
+            "Untuk mencari arah yang benar: nyalakan Pratinjau EIS, goyang HP, pilih angka yang bikin gambar paling tenang."
+        )
+
         // ---- Zoom
         section(c, "Zoom")
         choiceRow(
