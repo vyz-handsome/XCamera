@@ -4,8 +4,11 @@ import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.util.Range
 import android.graphics.Bitmap
 import android.net.Uri
@@ -26,10 +29,8 @@ import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.CameraState
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
-import androidx.camera.core.MirrorMode
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
@@ -147,6 +148,23 @@ class XCameraController(
         private set
     var stabilizationActive: Boolean = false
         private set
+    /** EIS buatan XCAM (gyroscope + GPU) ikut terpasang pada video. */
+    var softStabActive: Boolean = false
+        private set
+    /** EIS hardware diminta pada video. */
+    var hwStabRequested: Boolean = false
+        private set
+    /** Hasil kamera melaporkan EIS hardware benar-benar menyala. */
+    @Volatile var hwStabReported: Boolean = false
+        private set
+
+    /** Teks indikator EIS di layar. */
+    val stabilizationLabel: String
+        get() = when {
+            !stabilizationActive -> "EIS OFF"
+            softStabActive && !(hwStabRequested && hwStabReported) -> "EIS ON SW"
+            else -> "EIS ON"
+        }
 
     var activeLens: Lens = Lens.MAIN
         private set
@@ -217,14 +235,22 @@ class XCameraController(
     private var lensReport = "Belum ada data kamera."
     private var lastLensSwitch = 0L
     private var boundPhotoSize = "auto"
-    /** Apakah video yang sedang terpasang dicerminkan (kamera depan + pengaturan cermin). */
-    private var boundMirror = false
+    private var boundEisMode = "auto"
 
-    private class BindAttempt(val q: Quality?, val stab: Boolean, val fps: Int, val mirror: Boolean)
-
-    /** Kamera depan dan "Cerminkan" aktif: foto sudah dicerminkan, video harus ikut. */
-    private fun mirrorVideoWanted(): Boolean =
-        lensFacing == CameraSelector.LENS_FACING_FRONT && prefs.getBoolean(Prefs.MIRROR_FRONT, true)
+    // EIS software: satu pemroses GL dipakai ulang di setiap bind.
+    private var softProcessor: SoftEisProcessor? = null
+    private var softEffect: SoftEisEffect? = null
+    private fun softProc(): SoftEisProcessor {
+        val p = softProcessor ?: SoftEisProcessor(activity).also { softProcessor = it }
+        return p
+    }
+    private fun eisMode(): String = prefs.getString(Prefs.EIS_MODE, "auto") ?: "auto"
+    private fun gyroPresent(): Boolean = try {
+        (activity.getSystemService(Context.SENSOR_SERVICE) as android.hardware.SensorManager)
+            .getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null
+    } catch (e: Exception) {
+        false
+    }
 
     private var zoomLiveData: LiveData<ZoomState>? = null
     private val zoomObserver = Observer<ZoomState> { state ->
@@ -258,21 +284,14 @@ class XCameraController(
                 currentRotation = rotation
                 imageCapture?.targetRotation = rotation
                 videoCapture?.targetRotation = rotation
-                onRotationChanged?.invoke()
             }
         }
     }
 
-    /**
-     * Dipanggil saat HP berpindah orientasi (potret/lanskap). Rotasi video hanya dibaca saat rekaman dimulai,
-     * jadi Live Photo memakainya untuk memulai ulang buffer rekaman supaya video searah dengan foto.
-     */
-    var onRotationChanged: (() -> Unit)? = null
-
     init {
         videoQuality = qualityFromName(prefs.getString(KEY_VIDEO_QUALITY, "FHD"))
         videoFps = fpsFromPref(prefs.getString(Prefs.VIDEO_FPS, "auto"))
-        stabilizationOn = prefs.getBoolean(KEY_VIDEO_EIS, true)
+        stabilizationOn = prefs.getBoolean(KEY_VIDEO_EIS, false)
         lensFacing = if (prefs.getString(Prefs.DEFAULT_CAMERA, "back") == "front") {
             CameraSelector.LENS_FACING_FRONT
         } else {
@@ -305,6 +324,9 @@ class XCameraController(
         previewView.removeCallbacks(retryZoomRunnable)
         freezeView.removeCallbacks(freezeTimeout)
         recording?.stop()
+        softProcessor?.shutdown()
+        softProcessor = null
+        softEffect = null
     }
 
     fun switchCamera() {
@@ -370,6 +392,7 @@ class XCameraController(
             Lens.MAIN -> zoomRatio.coerceIn(mainMin, mainMax.coerceAtLeast(mainMin))
         }
         camera?.cameraControl?.setZoomRatio(native)
+        softProcessor?.setNativeZoom(native)
         shownZoom = zoomRatio
     }
 
@@ -618,12 +641,22 @@ class XCameraController(
         bind(keepZoom = true)
     }
 
-    /** Nyalakan/matikan EIS. Hanya berlaku jika kamera aktif mendukungnya. */
-    fun toggleStabilization() {
-        if (isRecording || !stabilizationSupported) return
-        stabilizationOn = !stabilizationOn
+    /**
+     * Nyalakan/matikan EIS pada Video dan video yang menjadi bagian Live Photo.
+     * Pemanggil harus menghentikan buffer Live Photo lebih dulu agar bind ulang
+     * tidak memutus file yang sedang direkam.
+     * @return true bila status yang diminta berhasil diterapkan.
+     */
+    fun toggleStabilization(): Boolean {
+        // recording mencakup rekaman video biasa maupun segmen buffer Live Photo.
+        if (isRecording || recording != null || !stabilizationSupported) return false
+        // Gunakan status yang benar-benar aktif agar ketukan berikutnya bisa mencoba ulang
+        // bila perangkat melaporkan dukungan EIS, tetapi kombinasi stream sebelumnya gagal.
+        stabilizationOn = !stabilizationActive
         prefs.edit().putBoolean(KEY_VIDEO_EIS, stabilizationOn).apply()
         bind(keepZoom = true)
+        // Kamera kadang mendukung EIS secara umum tetapi tidak pada kombinasi stream aktif.
+        return stabilizationActive == stabilizationOn
     }
 
     /** @return false jika video tidak tersedia atau gagal dimulai. */
@@ -667,7 +700,6 @@ class XCameraController(
                         }
                         // Setelah rekaman selesai, lensa boleh ganti lagi sesuai zoom.
                         setZoomRatio(zoomRatio)
-                        runPendingRebind()
                     }
                     else -> {}
                 }
@@ -704,7 +736,6 @@ class XCameraController(
                         val valid = event.error != VideoRecordEvent.Finalize.ERROR_NO_VALID_DATA &&
                             file.exists() && file.length() > 0
                         if (valid) callback.onFinished(Uri.fromFile(file)) else callback.onFailed("rekaman kosong")
-                        runPendingRebind()
                     }
                     else -> {}
                 }
@@ -722,12 +753,6 @@ class XCameraController(
 
     // ---- Info untuk debugging lensa
 
-    private fun eisModeLabel(): String = when (eisMode) {
-        2 -> "aktif (gyro, PREVIEW_STABILIZATION)"
-        1 -> "aktif (digital)"
-        else -> "aktif (OIS saja)"
-    }
-
     fun debugInfo(): String {
         val cam = camera
         val state = cam?.cameraInfo?.zoomState?.value
@@ -743,10 +768,18 @@ class XCameraController(
         sb.append("\nEIS: ").append(
             when {
                 !stabilizationSupported -> "tidak didukung kamera ini"
-                stabilizationActive -> eisModeLabel()
+                stabilizationActive -> "aktif (" + (if (hwStabRequested) "hardware diminta" else "") +
+                    (if (hwStabRequested && softStabActive) " + " else "") +
+                    (if (softStabActive) "software" else "") + ")"
                 else -> "didukung, sedang mati"
             }
         )
+        sb.append("\nMode EIS: ").append(eisMode())
+        if (hwStabRequested) sb.append("\nEIS hardware dilaporkan kamera: ").append(if (hwStabReported) "ya" else "tidak")
+        softProcessor?.let {
+            sb.append("\nEIS software: ").append(it.status)
+            sb.append("\nFrame diproses/dikoreksi: ").append(it.framesTotal).append(" / ").append(it.framesCorrected)
+        }
         sb.append(cameraDiagnostics())
         return sb.toString()
     }
@@ -755,23 +788,6 @@ class XCameraController(
      * Info untuk menjawab: bisakah dua kamera belakang menyala bersamaan (transisi mulus ala flagship)?
      * Dibaca langsung dari Camera2, jadi tidak bergantung pada CameraX.
      */
-    /** 0 = OFF, 1 = ON, 2 = PREVIEW (stabilisasi gyro, hanya untuk mode video). */
-    private fun stabModeNames(modes: IntArray?): String {
-        if (modes == null) return "tidak dilaporkan"
-        val names = ArrayList<String>()
-        for (m in modes) {
-            names.add(
-                when (m) {
-                    0 -> "OFF"
-                    1 -> "ON"
-                    2 -> "PREVIEW"
-                    else -> "kode " + m
-                }
-            )
-        }
-        return names.joinToString(", ")
-    }
-
     private fun cameraDiagnostics(): String {
         val sb = StringBuilder()
         try {
@@ -803,9 +819,6 @@ class XCameraController(
                     else -> "?"
                 }
                 sb.append("\nBelakang id $id: level $level, kamera fisik di dalamnya: $physical")
-                val eisText = stabModeNames(c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES))
-                val oisText = stabModeNames(c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION))
-                sb.append("\n   Stabilisasi video (EIS): ").append(eisText).append(" | OIS: ").append(oisText)
             }
         } catch (e: Exception) {
             sb.append("\n(info kamera bersamaan tidak terbaca)")
@@ -935,100 +948,35 @@ class XCameraController(
     // ---- Bind
 
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun buildVideo(
-        q: Quality, rotation: Int, stabilize: Boolean, fps: Int,
-        eis: Int = 1, ois: Boolean = false, mirror: Boolean = false
-    ): VideoCapture<Recorder> {
+    private fun buildVideo(q: Quality, rotation: Int, stabilize: Boolean, fps: Int): VideoCapture<Recorder> {
         val recorder = Recorder.Builder()
             .setQualitySelector(
                 QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q))
             )
             .build()
         val builder = VideoCapture.Builder(recorder)
-        // Kamera depan: video ikut dicerminkan seperti foto dan preview (kalau tidak, Live Photo "melompat" saat berganti dari video ke foto).
-        builder.setMirrorMode(if (mirror) MirrorMode.MIRROR_MODE_ON else MirrorMode.MIRROR_MODE_OFF)
         if (fps > 0) builder.setTargetFrameRate(Range(fps, fps))
-        if (stabilize && eis > 0) {
-            // EIS lewat Camera2 interop: mode 1 = ON (digital), mode 2 = PREVIEW_STABILIZATION (gyro).
-            Camera2Interop.Extender(builder).setCaptureRequestOption(
+        if (stabilize) {
+            // EIS dipasang pada VideoCapture yang dipakai oleh Video biasa dan buffer Live Photo.
+            // Ini meminta stabilisasi digital native dari kamera, bukan crop/post-processing manual.
+            val ext = Camera2Interop.Extender(builder)
+            ext.setCaptureRequestOption(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                if (eis == 2) 2 else CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
             )
-        }
-        if (stabilize && ois) {
-            Camera2Interop.Extender(builder).setCaptureRequestOption(
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-            )
+            // Cek apakah kamera benar-benar menyalakan EIS hardware (banyak HP menolaknya untuk app pihak ketiga).
+            ext.setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    hwStabReported = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE) ==
+                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                }
+            })
         }
         return builder.build().also { it.targetRotation = rotation }
-    }
-
-    // ---- EIS
-
-    /** Live Photo selalu memakai EIS (bagian videonya), tanpa tombol. Mengubahnya butuh bind ulang. */
-    private var liveStabilization = false
-    /** Bind ulang yang tertunda karena sedang merekam saat [setLiveStabilization] dipanggil. */
-    private var pendingRebind = false
-    /** Mode EIS yang dipakai di bind terakhir: 0 = mati, 1 = ON (digital), 2 = PREVIEW_STABILIZATION (gyro, lebih kuat). */
-    private var eisMode = 0
-    private var camStateLive: LiveData<CameraState>? = null
-    private val camStateObserver = Observer<CameraState> { st ->
-        val err = st.error ?: return@Observer
-        val fatal = err.code == CameraState.ERROR_STREAM_CONFIG || err.code == CameraState.ERROR_CAMERA_FATAL_ERROR
-        if (eisMode == 2 && fatal) {
-            // Kamera ini menolak EIS jenis kuat bersama konfigurasi stream kita: simpan, lalu pakai EIS biasa.
-            prefs.edit().putBoolean(KEY_EIS_STRONG_BAD, true).apply()
-            eisMode = 0
-            previewView.post { if (!isRecording && recording == null) bind(keepZoom = true) }
-        }
-    }
-
-    fun setLiveStabilization(on: Boolean) {
-        if (liveStabilization == on) return
-        liveStabilization = on
-        if (camera == null) return
-        if (isRecording || recording != null) pendingRebind = true else bind(keepZoom = true)
-    }
-
-    private fun runPendingRebind() {
-        if (!pendingRebind) return
-        pendingRebind = false
-        previewView.post { if (!isRecording && recording == null) bind(keepZoom = true) }
-    }
-
-    /**
-     * Pilih jenis EIS yang didukung kamera. PREVIEW_STABILIZATION (Android 13+) memakai data gyro dan jauh
-     * lebih mantap dari mode ON biasa; dipakai jika kamera mendukungnya dan belum pernah gagal di HP ini.
-     */
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun pickEisMode(info: androidx.camera.core.CameraInfo?): Int {
-        return try {
-            val modes = Camera2CameraInfo.from(info ?: return 1)
-                .getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-                ?: return 1
-            val strongOk = Build.VERSION.SDK_INT >= 33 && !prefs.getBoolean(KEY_EIS_STRONG_BAD, false)
-            when {
-                strongOk && modes.contains(2) -> 2 // CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
-                modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) -> 1
-                else -> 0
-            }
-        } catch (e: Exception) {
-            1
-        }
-    }
-
-    /** Kamera punya OIS (stabilisasi optik di lensa)? Dipakai bersama EIS saat merekam video. */
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun hasOis(info: androidx.camera.core.CameraInfo?): Boolean {
-        if (info == null) return false
-        return try {
-            val modes = Camera2CameraInfo.from(info)
-                .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
-            modes != null && modes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
-        } catch (e: Exception) {
-            false
-        }
     }
 
     private fun bind(keepZoom: Boolean = false) {
@@ -1065,47 +1013,41 @@ class XCameraController(
 
             // Coba preview + foto + video sekaligus, lalu turunkan bila kombinasi tidak didukung.
             val lowerOk = videoQuality == Quality.UHD || videoQuality == Quality.FHD
-            val wantStab = stabilizationOn || liveStabilization
-            val stillInfo = try {
-                selector.filter(p.availableCameraInfos).firstOrNull()
-            } catch (e: Exception) {
-                null
-            }
-            val strongMode = if (wantStab) pickEisMode(stillInfo) else 0
-            val oisOk = wantStab && hasOis(stillInfo)
-            val base = buildList<Pair<Quality?, Boolean>> {
-                if (wantStab) {
-                    add(Pair(videoQuality, true))
-                    if (lowerOk) add(Pair(Quality.HD, true))
+            val mode = eisMode()
+            val hwOk = mode != "soft" && hwEisAvailable(p, selector)
+            val softOk = mode != "hw" && gyroPresent()
+            val base = buildList<EisAttempt> {
+                if (stabilizationOn && (hwOk || softOk)) {
+                    // Hardware (jika ada) + software sebagai cadangan; software hanya bekerja bila
+                    // kamera tidak melaporkan EIS hardware menyala.
+                    add(EisAttempt(videoQuality, hwOk, softOk))
+                    if (lowerOk) add(EisAttempt(Quality.HD, hwOk, softOk))
+                    if (hwOk && softOk) {
+                        add(EisAttempt(videoQuality, false, true))
+                        if (lowerOk) add(EisAttempt(Quality.HD, false, true))
+                    }
                 }
-                add(Pair(videoQuality, false))
-                if (lowerOk) add(Pair(Quality.HD, false))
-                add(Pair(null, false))
+                add(EisAttempt(videoQuality, false, false))
+                if (lowerOk) add(EisAttempt(Quality.HD, false, false))
+                add(EisAttempt(null, false, false))
             }
             // FPS dicoba dulu di kualitas yang sama; kalau kombinasi gagal, FPS dilepas sebelum kualitas diturunkan.
             val fpsTarget = if (videoFps > 0 && !fpsSuspended) videoFps else 0
-            val mirrorVideo = mirrorVideoWanted()
-            val videoBase = base.filter { it.first != null }
-            val attempts = buildList<BindAttempt> {
-                // Mirror dicoba dulu; kalau HP tidak bisa memirror video, ulangi tanpa mirror sebelum menyerah ke "tanpa video".
-                for (mirror in listOf(mirrorVideo, false).distinct()) {
-                    for ((q, stab) in videoBase) {
-                        if (fpsTarget > 0) add(BindAttempt(q, stab, fpsTarget, mirror))
-                        add(BindAttempt(q, stab, 0, mirror))
-                    }
+            val attempts = buildList<EisAttempt> {
+                for (b in base) {
+                    if (fpsTarget > 0 && b.q != null) add(EisAttempt(b.q, b.hw, b.soft, fpsTarget))
+                    add(EisAttempt(b.q, b.hw, b.soft, 0))
                 }
-                add(BindAttempt(null, false, 0, false))
             }
             var bound: Camera? = null
             var boundCapture: ImageCapture? = null
             var boundVideo: VideoCapture<Recorder>? = null
-            var boundStab = false
+            var boundHw = false
+            var boundSoft = false
             var boundFps = 0
-            var boundMirrorNow = false
-            for (attempt in attempts) {
-                val q = attempt.q
-                val stab = attempt.stab
-                val fps = attempt.fps
+            for (at in attempts) {
+                val q = at.q
+                val fps = at.fps
                 val preview = Preview.Builder()
                     .setTargetRotation(rotation)
                     .build()
@@ -1128,12 +1070,19 @@ class XCameraController(
                     )
                 }
                 val capture = captureBuilder.build()
-                val video = q?.let { buildVideo(it, rotation, stab, fps, strongMode, oisOk, attempt.mirror) }
+                hwStabReported = false
+                val video = q?.let { buildVideo(it, rotation, at.hw, fps) }
+                val effect: SoftEisEffect? = if (at.soft && video != null) {
+                    softEffect ?: SoftEisEffect(softProc()).also { softEffect = it }
+                } else {
+                    null
+                }
                 val group = UseCaseGroup.Builder()
                     .addUseCase(preview)
                     .addUseCase(capture)
                     .apply {
                         video?.let { addUseCase(it) }
+                        effect?.let { addEffect(it) }
                         previewView.viewPort?.let { setViewPort(it) }
                     }
                     .build()
@@ -1142,10 +1091,9 @@ class XCameraController(
                     bound = p.bindToLifecycle(activity, selector, group)
                     boundCapture = capture
                     boundVideo = video
-                    boundStab = stab && video != null && (strongMode > 0 || oisOk)
-                    eisMode = if (stab && video != null) strongMode else 0
+                    boundHw = at.hw && video != null
+                    boundSoft = effect != null
                     boundFps = if (video != null) fps else 0
-                    boundMirrorNow = video != null && attempt.mirror
                     break
                 } catch (e: Exception) {
                     bound = null
@@ -1158,11 +1106,7 @@ class XCameraController(
                 return
             }
             camera = cam
-            camStateLive?.removeObserver(camStateObserver)
-            camStateLive = cam.cameraInfo.cameraState
-            camStateLive?.observe(activity, camStateObserver)
             boundPhotoSize = prefs.getString(Prefs.PHOTO_SIZE, "auto") ?: "auto"
-            boundMirror = boundMirrorNow
             imageCapture = boundCapture
             videoCapture = boundVideo
 
@@ -1177,10 +1121,15 @@ class XCameraController(
                 emptyList()
             }
             effectiveQuality = resolveQuality(supportedQualities)
-            stabilizationActive = boundStab
+            hwStabRequested = boundHw
+            softStabActive = boundSoft
+            stabilizationActive = boundHw || boundSoft
+            boundEisMode = mode
+            if (boundSoft) configureSoftEis(cam)
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
             effectiveFps = if (boundFps in supportedFps) boundFps else 0
-            stabilizationSupported = boundVideo != null && (checkEisSupport(cam) || hasOis(cam.cameraInfo))
+            stabilizationSupported = boundVideo != null &&
+                ((mode != "soft" && checkEisSupport(cam)) || (mode != "hw" && softOk))
 
             zoomLiveData?.removeObserver(zoomObserver)
             val zoomState = cam.cameraInfo.zoomState
@@ -1246,6 +1195,54 @@ class XCameraController(
         if (videoFps != 0 && camera != null && !isRecording) bind(keepZoom = true)
     }
 
+    private class EisAttempt(val q: Quality?, val hw: Boolean, val soft: Boolean, val fps: Int = 0)
+
+    /** Kamera yang akan dipilih [selector] mendukung EIS hardware (mode ON) menurut karakteristiknya. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun hwEisAvailable(p: ProcessCameraProvider, selector: CameraSelector): Boolean = try {
+        val info = selector.filter(p.availableCameraInfos).firstOrNull()
+        val modes = info?.let {
+            Camera2CameraInfo.from(it)
+                .getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+        }
+        modes != null && modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Isi data kamera aktif (orientasi sensor, FOV, basis waktu) ke pemroses EIS software. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun configureSoftEis(cam: Camera) {
+        val proc = softProcessor ?: return
+        try {
+            val c2 = Camera2CameraInfo.from(cam.cameraInfo)
+            val orient = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val facing = c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+            val focals = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            val size = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            val tsSource = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+            val focal = focals?.firstOrNull() ?: 0f
+            // Tanpa data fokus/sensor, pakai perkiraan FOV horizontal ~ 70 derajat.
+            val tanHalf = if (focal > 0f && size != null && size.width > 0f) {
+                (size.width / (2f * focal)).toDouble()
+            } else {
+                0.70
+            }
+            proc.setCamera(
+                SoftEisCamera(
+                    sensorOrientation = orient,
+                    facingBack = facing != CameraCharacteristics.LENS_FACING_FRONT,
+                    tanHalfX = tanHalf,
+                    timestampRealtime = tsSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+                )
+            )
+        } catch (e: Exception) {
+            proc.setCamera(null)
+        }
+        proc.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
+        proc.bypassProvider = { hwStabRequested && hwStabReported }
+    }
+
     @OptIn(ExperimentalCamera2Interop::class)
     private fun checkEisSupport(cam: Camera): Boolean = try {
         val modes = Camera2CameraInfo.from(cam.cameraInfo)
@@ -1275,8 +1272,9 @@ class XCameraController(
         val fps = fpsFromPref(prefs.getString(Prefs.VIDEO_FPS, "auto"))
         val fpsChanged = fps != videoFps
         if (fpsChanged) videoFps = fps
-        val mirrorChanged = videoCapture != null && mirrorVideoWanted() != boundMirror
-        if (qualityChanged || now != boundPhotoSize || mirrorChanged || (fpsChanged && !fpsSuspended)) bind(keepZoom = true)
+        softProcessor?.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
+        val eisChanged = eisMode() != boundEisMode && stabilizationOn && recording == null
+        if (qualityChanged || now != boundPhotoSize || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
     }
 
     private fun resolveQuality(supported: List<Quality>): Quality? {
@@ -1306,7 +1304,6 @@ class XCameraController(
         private const val KEY_VIDEO_QUALITY = "video_quality"
         private val FPS_CHOICES = listOf(24, 30, 60)
         private const val KEY_VIDEO_EIS = "video_eis"
-        private const val KEY_EIS_STRONG_BAD = "eis_strong_bad"
         private const val MAX_ZOOM = 10f
         /** Lama kedip pra-flash (kedip pertama, lama). */
         private const val PRE_FLASH_MS = 450L

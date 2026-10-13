@@ -9,13 +9,14 @@ object Prefs {
 
     const val VIDEO_QUALITY = "video_quality"      // UHD | FHD | HD | SD
     const val LOOP_SECONDS = "loop_seconds"        // 15 | 30 | 60 | atau angka sendiri (5-180)
-    const val LIVE_REAL_PHOTO = "live_real_photo"  // boolean: Live Photo memakai foto asli (video jeda sebentar)
     const val VIDEO_FPS = "video_fps"              // auto | 24 | 30 | 60
     const val DEFAULT_CAMERA = "default_camera"    // back | front
     const val DEFAULT_FLASH = "default_flash"      // off | auto | on
     const val PHOTO_SIZE = "photo_size"            // auto | WxH
     const val MIRROR_FRONT = "mirror_front"        // boolean
     const val SHOW_GRID = "show_grid"              // boolean
+    const val EIS_MODE = "eis_mode"                // auto | soft | hw
+    const val EIS_STRENGTH = "eis_strength"        // normal | strong (EIS software)
     const val ZOOM_SMOOTH = "zoom_smooth"          // fast | normal | soft
     const val ZOOM_SLIDER_ON_PINCH = "zoom_slider_pinch" // boolean
 

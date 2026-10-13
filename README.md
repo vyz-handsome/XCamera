@@ -21,9 +21,6 @@ Tips: tekan lama logo "XCAM" di layar kamera untuk melihat info lensa yang terde
 - Tahap 8f: pengaturan kualitas foto Live (8e) dibatalkan karena hasil foto jadi hitam. Info Lensa menampilkan ukuran foto yang dipakai.
 
 - Tahap 8g: flash tetap bisa dipakai di lensa ultra-wide 0,5x (lampu dipinjam dari kamera utama lewat torch) untuk foto, Live Photo, dan senter video.
+- Tahap 8h: EIS bisa diaktifkan dari mode Video maupun LIVE. Stabilisasi diterapkan pada VideoCapture yang juga merekam klip video di dalam Live Photo; saat pengaturan diganti, buffer dihentikan dan dimulai ulang dengan aman. Indikator menampilkan status EIS yang benar-benar aktif.
 
-- Tahap 8h: EIS dinyalakan bawaan (bisa dimatikan lewat tombol di mode Video) dan selalu dipakai di mode Live Photo untuk bagian videonya. Pakai PREVIEW_STABILIZATION (gyro, Android 13+) jika didukung kamera, otomatis kembali ke EIS biasa kalau HP menolaknya. Foto Live Photo kini diambil sebagai foto asli: rekaman dijeda saat shutter, foto diambil lewat jalur foto biasa, lalu rekaman dilanjutkan dan disambung (bisa dimatikan di Settings: "Live Photo: foto asli").
-
-- Tahap 8i: info lensa menampilkan mode EIS/OIS yang dilaporkan tiap kamera belakang. OIS ikut dinyalakan saat merekam video jika kamera punya; tombol EIS muncul jika EIS atau OIS didukung.
-
-- Tahap 8j: perbaikan kompilasi tahap 8i (fungsi hasOis dan teks diagnostik EIS/OIS ditulis ulang dengan sintaks yang lebih aman).
+- Tahap 9: EIS software buatan sendiri (SoftEis.kt). Untuk HP yang tidak mengizinkan EIS hardware di app pihak ketiga. Gyroscope dibaca terus, orientasi kamera dihaluskan (low-pass 2 tahap), lalu selisihnya dikoreksi di GPU sebagai CameraEffect pada VideoCapture, jadi berlaku untuk mode Video dan klip video di Live Photo. EIS hardware tetap dicoba lebih dulu; software hanya bekerja jika kamera tidak melaporkan EIS hardware menyala. Settings: Mode EIS (otomatis / software saja / hardware saja) dan Kekuatan EIS software (normal / kuat). Info lensa (tekan lama logo XCAM) menampilkan status EIS software.

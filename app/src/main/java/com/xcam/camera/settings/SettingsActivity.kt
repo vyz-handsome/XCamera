@@ -81,7 +81,7 @@ class SettingsActivity : AppCompatActivity() {
             "Ukuran 4:3 yang didukung kamera belakang. Kamera depan memakai ukuran terdekat."
         )
         switchRow(
-            c, "Cerminkan hasil kamera depan", "Foto dan video selfie sama seperti yang terlihat di preview.",
+            c, "Cerminkan foto kamera depan", "Hasil selfie sama seperti yang terlihat di preview.",
             Prefs.MIRROR_FRONT, true
         )
 
@@ -91,16 +91,30 @@ class SettingsActivity : AppCompatActivity() {
             c, "Kualitas video", Prefs.VIDEO_QUALITY, "FHD", videoQualityOptions(),
             "Jika HP tidak mampu di kualitas ini, XCAM otomatis turun ke yang terdekat."
         )
-        switchRow(
-            c, "Live Photo: foto asli", "Saat shutter, rekaman dijeda sebentar untuk mengambil foto biasa (kualitas penuh), lalu " +
-                "dilanjutkan. Videonya ada lompatan singkat di titik foto. Matikan untuk foto tanpa jeda " +
-                "(foto dijepret sambil video merekam).",
-            Prefs.LIVE_REAL_PHOTO, true
-        )
         choiceRow(
             c, "Frame rate video (FPS)", Prefs.VIDEO_FPS, "auto", videoFpsOptions(),
             "Hanya berlaku di mode Video. Mode Foto dan Live Photo selalu otomatis. " +
                 "Jika kombinasi FPS dan kualitas tidak didukung, XCAM memakai yang terdekat."
+        )
+
+        choiceRow(
+            c, "Mode EIS", Prefs.EIS_MODE, "auto",
+            listOf(
+                Option("auto", "Otomatis (hardware, lalu software)"),
+                Option("soft", "Software saja (gyroscope)"),
+                Option("hw", "Hardware saja")
+            ),
+            "Software = EIS buatan XCAM memakai gyroscope, untuk HP yang tidak mengizinkan EIS hardware " +
+                "di app pihak ketiga. Pilih \"Software saja\" jika EIS hardware aktif tapi hasilnya tetap bergetar. " +
+                "Berlaku setelah kamera dibuka ulang."
+        )
+        choiceRow(
+            c, "Kekuatan EIS software", Prefs.EIS_STRENGTH, "normal",
+            listOf(
+                Option("normal", "Normal (crop ringan, lebih tajam)"),
+                Option("strong", "Kuat (lebih halus, crop lebih besar)")
+            ),
+            "Kuat meredam getaran lebih banyak tetapi bidang pandang video lebih sempit."
         )
 
         // ---- Zoom

@@ -102,7 +102,6 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         controller = XCameraController(this, binding.previewView, binding.previewFreeze)
             .also { it.listener = this }
         liveEngine = LivePhotoEngine(this, controller, liveCallback)
-        controller.onRotationChanged = { liveEngine.onOrientationChanged() }
         zoomControls = ZoomController(
             this, controller, binding.zoomBar, binding.zoomSliderPanel, binding.zoomSlider
         )
@@ -127,7 +126,7 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
             controller.cycleVideoFps()
             updateQualityUi()
         }
-        binding.btnStab.setOnClickListener { controller.toggleStabilization() }
+        binding.btnStab.setOnClickListener { toggleEisForCurrentMode() }
         // Tekan lama logo XCAM untuk melihat info lensa kamera (berguna kalau ultra-wide tidak terdeteksi).
         binding.tvBrand.setOnLongClickListener {
             AlertDialog.Builder(this)
@@ -514,6 +513,42 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         )
     }
 
+    /** EIS dipakai oleh video biasa dan klip video di dalam Live Photo. */
+    private fun toggleEisForCurrentMode() {
+        if (!::controller.isInitialized) return
+        if (mode == CameraMode.LIVE) {
+            if (liveEngine.isBusy) {
+                Toast.makeText(this, "Tunggu Live Photo selesai dulu", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val queued = liveEngine.stopForReconfiguration {
+                val applied = controller.toggleStabilization()
+                updateQualityUi()
+                if (!applied) {
+                    Toast.makeText(
+                        this,
+                        if (controller.stabilizationOn) "EIS tidak bisa aktif pada kombinasi kamera ini" else "EIS tidak dapat diubah sekarang",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                ensureLiveBuffer()
+            }
+            if (!queued) {
+                Toast.makeText(this, "Buffer Live Photo belum siap diubah", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            val applied = controller.toggleStabilization()
+            updateQualityUi()
+            if (!applied) {
+                Toast.makeText(
+                    this,
+                    if (controller.stabilizationOn) "EIS tidak bisa aktif pada kombinasi kamera ini" else "EIS tidak dapat diubah sekarang",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
     private fun updateQualityUi() {
         val q = controller.effectiveQuality
         if (mode == CameraMode.VIDEO && q != null) {
@@ -525,8 +560,15 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         val fpsOk = mode == CameraMode.VIDEO && q != null && controller.supportedFps.isNotEmpty()
         binding.btnFps.visibility = if (fpsOk) View.VISIBLE else View.GONE
         if (fpsOk) binding.btnFps.text = controller.fpsLabel(controller.effectiveFps)
-        val showStab = mode == CameraMode.VIDEO && controller.stabilizationSupported
+        val showStab = (mode == CameraMode.VIDEO || mode == CameraMode.LIVE) &&
+            controller.stabilizationSupported
         binding.btnStab.visibility = if (showStab) View.VISIBLE else View.GONE
+        binding.btnStab.text = controller.stabilizationLabel
+        binding.btnStab.contentDescription = if (controller.stabilizationActive) {
+            "Electronic image stabilization aktif. Ketuk untuk mematikan"
+        } else {
+            "Electronic image stabilization mati. Ketuk untuk mengaktifkan"
+        }
         binding.btnStab.setTextColor(
             ContextCompat.getColor(
                 this,
@@ -607,7 +649,6 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         binding.shutterInner.setBackgroundResource(shutterBg())
         updateLiveUi()
         if (::controller.isInitialized) {
-            controller.setLiveStabilization(mode == CameraMode.LIVE)
             controller.setFpsSuspended(mode != CameraMode.VIDEO)
             updateFlashUi()
             updateQualityUi()
