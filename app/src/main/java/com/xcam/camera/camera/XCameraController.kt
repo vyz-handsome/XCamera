@@ -242,6 +242,9 @@ class XCameraController(
     // EIS software: satu pemroses GL dipakai ulang di setiap bind.
     private var softProcessor: SoftEisProcessor? = null
     private var softEffect: SoftEisEffect? = null
+    private fun eisPreview(): Boolean = prefs.getBoolean(Prefs.EIS_PREVIEW, false)
+    private fun eisFlip(): Int = (prefs.getString(Prefs.EIS_FLIP, "0")?.toIntOrNull() ?: 0).coerceIn(0, 7)
+    private fun eisCfgKey(): String = eisMode() + "/" + eisPreview() + "/" + eisFlip()
     private fun softProc(): SoftEisProcessor {
         val p = softProcessor ?: SoftEisProcessor(activity).also { softProcessor = it }
         return p
@@ -786,7 +789,10 @@ class XCameraController(
         if (hwStabRequested) sb.append("\nEIS hardware dilaporkan kamera: ").append(if (hwStabReported) "ya" else "tidak")
         softProcessor?.let {
             sb.append("\nEIS software: ").append(it.status)
-            sb.append("\nFrame diproses/dikoreksi: ").append(it.framesTotal).append(" / ").append(it.framesCorrected)
+            sb.append("\nFrame diproses/dikoreksi/timestamp tak cocok: ").append(it.framesTotal).append(" / ")
+                .append(it.framesCorrected).append(" / ").append(it.framesMismatch)
+            sb.append("\nSampel gyro: ").append(it.gyroSamples)
+            if (it.diag.isNotEmpty()) sb.append("\n").append(it.diag)
         }
         sb.append(cameraDiagnostics())
         return sb.toString()
@@ -1081,7 +1087,10 @@ class XCameraController(
                 hwStabReported = false
                 val video = q?.let { buildVideo(it, rotation, at.hw, fps) }
                 val effect: SoftEisEffect? = if (at.soft && video != null) {
-                    softEffect ?: SoftEisEffect(softProc()).also { softEffect = it }
+                    val wantPreview = eisPreview()
+                    val cached = softEffect
+                    if (cached != null && cached.withPreview == wantPreview) cached
+                    else SoftEisEffect(softProc(), wantPreview).also { softEffect = it }
                 } else {
                     null
                 }
@@ -1132,7 +1141,7 @@ class XCameraController(
             hwStabRequested = boundHw
             softStabActive = boundSoft
             stabilizationActive = boundHw || boundSoft
-            boundEisMode = mode
+            boundEisMode = eisCfgKey()
             if (boundSoft) configureSoftEis(cam)
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
             effectiveFps = if (boundFps in supportedFps) boundFps else 0
@@ -1266,6 +1275,7 @@ class XCameraController(
             proc.setCamera(null)
         }
         proc.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
+        proc.setFlip(eisFlip())
         proc.bypassProvider = { hwStabRequested && hwStabReported }
     }
 
@@ -1300,7 +1310,7 @@ class XCameraController(
         val fpsChanged = fps != videoFps
         if (fpsChanged) videoFps = fps
         softProcessor?.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
-        val eisChanged = eisMode() != boundEisMode && stabilizationOn && recording == null
+        val eisChanged = eisCfgKey() != boundEisMode && stabilizationOn && recording == null
         if (qualityChanged || now != boundPhotoSize || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
     }
 
