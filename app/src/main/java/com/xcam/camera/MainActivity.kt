@@ -649,8 +649,7 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         binding.shutterInner.setBackgroundResource(shutterBg())
         updateLiveUi()
         if (::controller.isInitialized) {
-            // Mode Foto: kamera tanpa video (foto resolusi penuh). Video/Live: video ikut di-bind.
-            controller.configureForMode(video = mode != CameraMode.PHOTO, suspendFps = mode != CameraMode.VIDEO)
+            controller.setFpsSuspended(mode != CameraMode.VIDEO)
             updateFlashUi()
             updateQualityUi()
         }

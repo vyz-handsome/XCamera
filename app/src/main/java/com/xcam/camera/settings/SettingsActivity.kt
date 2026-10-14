@@ -118,10 +118,6 @@ class SettingsActivity : AppCompatActivity() {
         )
 
         switchRow(
-            c, "Foto Live resolusi tinggi (uji)", "Foto di dalam Live Photo minta ukuran sebesar mungkin (jepretan shutter asli, bukan frame video). Kalau HP tidak mendukung bareng video, otomatis turun ke ukuran standar. Berlaku setelah ganti mode atau buka ulang kamera.",
-            Prefs.LIVE_HI_STILL, false
-        )
-        switchRow(
             c, "Pratinjau EIS (uji)", "Preview ikut distabilkan EIS software supaya hasilnya bisa dilihat langsung tanpa merekam. Berlaku setelah kamera dibuka ulang.",
             Prefs.EIS_PREVIEW, false
         )
