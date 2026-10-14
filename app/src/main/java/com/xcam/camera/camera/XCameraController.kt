@@ -235,6 +235,7 @@ class XCameraController(
     private var lensReport = "Belum ada data kamera."
     private var lastLensSwitch = 0L
     private var boundPhotoSize = "auto"
+    private var boundFullViewPref = true
     private var boundEisMode = "auto"
     /** Nilai CONTROL_VIDEO_STABILIZATION_MODE yang diminta: 1 = ON, 2 = PREVIEW_STABILIZATION (Android 13+). */
     private var hwModeValue = 1
@@ -770,6 +771,8 @@ class XCameraController(
         sb.append("\nVideo: ").append(if (videoAvailable) "tersedia" else "tidak tersedia bareng preview")
         val still = try { imageCapture?.resolutionInfo?.resolution } catch (e: Exception) { null }
         sb.append("\nUkuran foto saat ini: ").append(if (still != null) "${still.width}x${still.height}" else "belum diketahui")
+        val crop = try { imageCapture?.resolutionInfo?.cropRect } catch (e: Exception) { null }
+        if (crop != null) sb.append("\nHasil foto (setelah crop): ").append("${crop.width()}x${crop.height()}")
         sb.append("\nEIS: ").append(
             when {
                 !stabilizationSupported -> "tidak didukung kamera ini"
@@ -1060,6 +1063,11 @@ class XCameraController(
             var boundHw = false
             var boundSoft = false
             var boundFps = 0
+            // Foto tanpa crop preview: ImageCapture dipasang terpisah dari grup yang memakai ViewPort, jadi hasilnya
+            // memakai seluruh area sensor 4:3 (mis. 12 MP), bukan potongan setinggi preview (sekitar 10 MP).
+            // Jika HP menolak, diulang dengan foto yang ikut di-crop seperti sebelumnya.
+            val wantFullView = prefs.getBoolean(Prefs.PHOTO_FULL_VIEW, true)
+            fullLoop@ for (fullView in listOf(wantFullView, false).distinct()) {
             for (at in attempts) {
                 val q = at.q
                 val fps = at.fps
@@ -1097,8 +1105,8 @@ class XCameraController(
                 }
                 val group = UseCaseGroup.Builder()
                     .addUseCase(preview)
-                    .addUseCase(capture)
                     .apply {
+                        if (!fullView) addUseCase(capture)
                         video?.let { addUseCase(it) }
                         effect?.let { addEffect(it) }
                         previewView.viewPort?.let { setViewPort(it) }
@@ -1107,15 +1115,17 @@ class XCameraController(
                 try {
                     p.unbindAll()
                     bound = p.bindToLifecycle(activity, selector, group)
+                    if (fullView) p.bindToLifecycle(activity, selector, capture)
                     boundCapture = capture
                     boundVideo = video
                     boundHw = at.hw && video != null
                     boundSoft = effect != null
                     boundFps = if (video != null) fps else 0
-                    break
+                    break@fullLoop
                 } catch (e: Exception) {
                     bound = null
                 }
+            }
             }
 
             val cam = bound
@@ -1125,6 +1135,7 @@ class XCameraController(
             }
             camera = cam
             boundPhotoSize = prefs.getString(Prefs.PHOTO_SIZE, "auto") ?: "auto"
+            boundFullViewPref = wantFullView
             imageCapture = boundCapture
             videoCapture = boundVideo
 
@@ -1341,7 +1352,8 @@ class XCameraController(
         if (fpsChanged) videoFps = fps
         softProcessor?.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
         val eisChanged = eisCfgKey() != boundEisMode && stabilizationOn && recording == null
-        if (qualityChanged || now != boundPhotoSize || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
+        val fullViewChanged = prefs.getBoolean(Prefs.PHOTO_FULL_VIEW, true) != boundFullViewPref
+        if (qualityChanged || now != boundPhotoSize || fullViewChanged || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
     }
 
     private fun resolveQuality(supported: List<Quality>): Quality? {

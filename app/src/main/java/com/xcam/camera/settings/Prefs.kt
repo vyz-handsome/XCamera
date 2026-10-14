@@ -13,6 +13,7 @@ object Prefs {
     const val DEFAULT_CAMERA = "default_camera"    // back | front
     const val DEFAULT_FLASH = "default_flash"      // off | auto | on
     const val PHOTO_SIZE = "photo_size"            // auto | WxH
+    const val PHOTO_FULL_VIEW = "photo_full_view"  // boolean: foto tidak di-crop ke bentuk preview (resolusi penuh)
     const val MIRROR_FRONT = "mirror_front"        // boolean
     const val SHOW_GRID = "show_grid"              // boolean
     const val EIS_MODE = "eis_mode"                // auto | soft | hw

@@ -81,6 +81,12 @@ class SettingsActivity : AppCompatActivity() {
             "Ukuran 4:3 yang didukung kamera belakang. Kamera depan memakai ukuran terdekat."
         )
         switchRow(
+            c, "Foto penuh (tanpa crop)",
+            "Foto memakai seluruh area sensor 4:3 (mis. 12 MP), jadi sedikit lebih lebar dari preview. " +
+                "Matikan agar foto sama persis dengan preview, tapi resolusinya lebih kecil (sekitar 10 MP).",
+            Prefs.PHOTO_FULL_VIEW, true
+        )
+        switchRow(
             c, "Cerminkan foto kamera depan", "Hasil selfie sama seperti yang terlihat di preview.",
             Prefs.MIRROR_FRONT, true
         )
