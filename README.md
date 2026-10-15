@@ -25,4 +25,6 @@ Tips: tekan lama logo "XCAM" di layar kamera untuk melihat info lensa yang terde
 
 - Tahap 9: EIS software buatan sendiri (SoftEis.kt). Untuk HP yang tidak mengizinkan EIS hardware di app pihak ketiga. Gyroscope dibaca terus, orientasi kamera dihaluskan (low-pass 2 tahap), lalu selisihnya dikoreksi di GPU sebagai CameraEffect pada VideoCapture, jadi berlaku untuk mode Video dan klip video di Live Photo. EIS hardware tetap dicoba lebih dulu; software hanya bekerja jika kamera tidak melaporkan EIS hardware menyala. Settings: Mode EIS (otomatis / software saja / hardware saja) dan Kekuatan EIS software (normal / kuat). Info lensa (tekan lama logo XCAM) menampilkan status EIS software.
 
-- Tahap 9f: opsi "Foto penuh (tanpa crop)" (default aktif): ImageCapture dipasang terpisah dari grup ViewPort sehingga foto memakai seluruh sensor 4:3 (12 MP, bukan sekitar 10 MP hasil crop ke bentuk preview). Info lensa menampilkan ukuran hasil foto setelah crop.
+- Foto penuh sensor (Settings): ImageCapture dibind di luar ViewPort sehingga foto tersimpan utuh 4:3 (sekitar 12 MP di HP ini), tidak dipotong mengikuti preview. Saat video aktif (Video/Live), batas ukuran foto ditentukan hardware level LIMITED.
+
+- Foto resolusi penuh saat Live/Video (Settings, eksperimen): preview dan video dialirkan lewat pemroses GL (pass-through saat EIS mati) sehingga hanya satu aliran kamera dipakai dan foto 4:3 bisa diambil penuh sambil merekam.
