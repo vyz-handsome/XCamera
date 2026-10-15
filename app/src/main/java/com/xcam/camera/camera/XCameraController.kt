@@ -235,8 +235,7 @@ class XCameraController(
     private var lensReport = "Belum ada data kamera."
     private var lastLensSwitch = 0L
     private var boundPhotoSize = "auto"
-    private var boundFullFrame = true
-    private var boundHqShare = true
+    private var boundFullViewPref = true
     private var boundEisMode = "auto"
     /** Nilai CONTROL_VIDEO_STABILIZATION_MODE yang diminta: 1 = ON, 2 = PREVIEW_STABILIZATION (Android 13+). */
     private var hwModeValue = 1
@@ -772,6 +771,9 @@ class XCameraController(
         sb.append("\nVideo: ").append(if (videoAvailable) "tersedia" else "tidak tersedia bareng preview")
         val still = try { imageCapture?.resolutionInfo?.resolution } catch (e: Exception) { null }
         sb.append("\nUkuran foto saat ini: ").append(if (still != null) "${still.width}x${still.height}" else "belum diketahui")
+        val crop = try { imageCapture?.resolutionInfo?.cropRect } catch (e: Exception) { null }
+        if (crop != null) sb.append("\nHasil foto (setelah crop): ").append("${crop.width()}x${crop.height()}")
+        sb.append("\nKonfigurasi: ").append(if (photoOnly) "mode Foto (tanpa video)" else "Video/Live (preview + foto + video)")
         sb.append("\nEIS: ").append(
             when {
                 !stabilizationSupported -> "tidak didukung kamera ini"
@@ -1033,8 +1035,13 @@ class XCameraController(
             hwModeValue = if (mode != "soft") hwEisModeFor(p, selector) else 0
             val hwOk = hwModeValue != 0
             val softOk = mode != "hw" && gyroPresent()
-            val hqShare = prefs.getBoolean(Prefs.HQ_STILL_SHARED, true) && mode != "hw" && gyroPresent()
             val base = buildList<EisAttempt> {
+                if (photoOnly) {
+                    // Mode Foto: hanya preview + foto. Tanpa VideoCapture dan tanpa EIS, kamera boleh memberi foto
+                    // dengan resolusi maksimum (kombinasi preview + JPEG maksimum selalu didukung).
+                    add(EisAttempt(null, false, false))
+                    return@buildList
+                }
                 if (stabilizationOn && (hwOk || softOk)) {
                     // Hardware (jika ada) + software sebagai cadangan; software hanya bekerja bila
                     // kamera tidak melaporkan EIS hardware menyala.
@@ -1044,13 +1051,6 @@ class XCameraController(
                         add(EisAttempt(videoQuality, false, true))
                         if (lowerOk) add(EisAttempt(Quality.HD, false, true))
                     }
-                }
-                // Tanpa EIS: tetap pakai pemroses GL sebagai pass-through supaya preview dan video berbagi
-                // satu aliran kamera. Dengan begitu foto resolusi penuh boleh diambil sambil merekam
-                // (di level LIMITED, aliran video terpisah membatasi foto jadi sekitar 2 MP).
-                if (hqShare && !(stabilizationOn && (hwOk || softOk))) {
-                    add(EisAttempt(videoQuality, false, true))
-                    if (lowerOk) add(EisAttempt(Quality.HD, false, true))
                 }
                 add(EisAttempt(videoQuality, false, false))
                 if (lowerOk) add(EisAttempt(Quality.HD, false, false))
@@ -1070,6 +1070,9 @@ class XCameraController(
             var boundHw = false
             var boundSoft = false
             var boundFps = 0
+            // Mode Foto penuh: tanpa ViewPort, foto memakai seluruh sensor 4:3 (mis. 12 MP) dan bukan potongan
+            // setinggi preview (sekitar 10 MP). Foto jadi sedikit lebih lebar dari preview.
+            val wantFullView = prefs.getBoolean(Prefs.PHOTO_FULL_VIEW, true)
             for (at in attempts) {
                 val q = at.q
                 val fps = at.fps
@@ -1098,38 +1101,25 @@ class XCameraController(
                 hwStabReported = false
                 val video = q?.let { buildVideo(it, rotation, at.hw, fps) }
                 val effect: SoftEisEffect? = if (at.soft && video != null) {
-                    val wantPreview = eisPreview() || prefs.getBoolean(Prefs.HQ_STILL_SHARED, true)
+                    val wantPreview = eisPreview()
                     val cached = softEffect
                     if (cached != null && cached.withPreview == wantPreview) cached
                     else SoftEisEffect(softProc(), wantPreview).also { softEffect = it }
                 } else {
                     null
                 }
-                // Foto penuh sensor: ImageCapture di luar ViewPort supaya tidak ikut dipotong mengikuti preview
-                // (preview sempit/tinggi memotong foto 4:3 jadi sekitar 10 MP).
-                val fullFrame = prefs.getBoolean(Prefs.PHOTO_FULL_FRAME, true)
-                fun buildGroup(withCapture: Boolean) = UseCaseGroup.Builder()
+                val group = UseCaseGroup.Builder()
                     .addUseCase(preview)
+                    .addUseCase(capture)
                     .apply {
-                        if (withCapture) addUseCase(capture)
                         video?.let { addUseCase(it) }
                         effect?.let { addEffect(it) }
-                        previewView.viewPort?.let { setViewPort(it) }
+                        if (!(photoOnly && wantFullView)) previewView.viewPort?.let { setViewPort(it) }
                     }
                     .build()
                 try {
                     p.unbindAll()
-                    var cameraBound = p.bindToLifecycle(activity, selector, buildGroup(!fullFrame))
-                    if (fullFrame) {
-                        try {
-                            cameraBound = p.bindToLifecycle(activity, selector, capture)
-                        } catch (e: Exception) {
-                            // Gabungan use case tidak didukung HP ini: kembali ke cara lama (foto ikut dipotong).
-                            p.unbindAll()
-                            cameraBound = p.bindToLifecycle(activity, selector, buildGroup(true))
-                        }
-                    }
-                    bound = cameraBound
+                    bound = p.bindToLifecycle(activity, selector, group)
                     boundCapture = capture
                     boundVideo = video
                     boundHw = at.hw && video != null
@@ -1148,8 +1138,7 @@ class XCameraController(
             }
             camera = cam
             boundPhotoSize = prefs.getString(Prefs.PHOTO_SIZE, "auto") ?: "auto"
-            boundFullFrame = prefs.getBoolean(Prefs.PHOTO_FULL_FRAME, true)
-            boundHqShare = prefs.getBoolean(Prefs.HQ_STILL_SHARED, true)
+            boundFullViewPref = wantFullView
             imageCapture = boundCapture
             videoCapture = boundVideo
 
@@ -1165,9 +1154,8 @@ class XCameraController(
             }
             effectiveQuality = resolveQuality(supportedQualities)
             hwStabRequested = boundHw
-            // Efek GL bisa terpasang hanya untuk berbagi aliran (pass-through): itu bukan EIS aktif.
-            softStabActive = boundSoft && stabilizationOn
-            stabilizationActive = boundHw || (boundSoft && stabilizationOn)
+            softStabActive = boundSoft
+            stabilizationActive = boundHw || boundSoft
             boundEisMode = eisCfgKey()
             if (boundSoft) configureSoftEis(cam)
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
@@ -1227,6 +1215,19 @@ class XCameraController(
         videoFps = options[(cur + 1) % options.size]
         prefs.edit().putString(Prefs.VIDEO_FPS, if (videoFps == 0) "auto" else videoFps.toString()).apply()
         bind(keepZoom = true)
+    }
+
+    /** True di mode Foto: kamera dibuka hanya dengan preview + foto (tanpa video/EIS) supaya resolusi foto maksimal. */
+    private var photoOnly = false
+
+    /**
+     * Mode Foto memakai konfigurasi tanpa video; Video dan Live memakai konfigurasi lengkap.
+     * Berpindah antar keduanya membuat kamera di-bind ulang sebentar (tidak saat merekam).
+     */
+    fun setPhotoOnly(photo: Boolean) {
+        if (photoOnly == photo) return
+        photoOnly = photo
+        if (camera != null && !isRecording) bind(keepZoom = true)
     }
 
     /**
@@ -1332,8 +1333,7 @@ class XCameraController(
         }
         proc.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
         proc.setFlip(eisFlip())
-        // Pass-through bila EIS hardware sudah aktif atau EIS dimatikan user (efek tetap dipakai untuk berbagi aliran).
-        proc.bypassProvider = { (hwStabRequested && hwStabReported) || !stabilizationOn }
+        proc.bypassProvider = { hwStabRequested && hwStabReported }
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -1368,9 +1368,8 @@ class XCameraController(
         if (fpsChanged) videoFps = fps
         softProcessor?.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
         val eisChanged = eisCfgKey() != boundEisMode && stabilizationOn && recording == null
-        val fullChanged = prefs.getBoolean(Prefs.PHOTO_FULL_FRAME, true) != boundFullFrame ||
-            prefs.getBoolean(Prefs.HQ_STILL_SHARED, true) != boundHqShare
-        if (qualityChanged || now != boundPhotoSize || fullChanged || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
+        val fullViewChanged = photoOnly && prefs.getBoolean(Prefs.PHOTO_FULL_VIEW, true) != boundFullViewPref
+        if (qualityChanged || now != boundPhotoSize || fullViewChanged || (fpsChanged && !fpsSuspended) || eisChanged) bind(keepZoom = true)
     }
 
     private fun resolveQuality(supported: List<Quality>): Quality? {

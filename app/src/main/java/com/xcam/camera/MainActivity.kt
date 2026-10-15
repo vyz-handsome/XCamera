@@ -649,6 +649,7 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
         binding.shutterInner.setBackgroundResource(shutterBg())
         updateLiveUi()
         if (::controller.isInitialized) {
+            controller.setPhotoOnly(mode == CameraMode.PHOTO)
             controller.setFpsSuspended(mode != CameraMode.VIDEO)
             updateFlashUi()
             updateQualityUi()

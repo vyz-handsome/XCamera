@@ -81,18 +81,15 @@ class SettingsActivity : AppCompatActivity() {
             "Ukuran 4:3 yang didukung kamera belakang. Kamera depan memakai ukuran terdekat."
         )
         switchRow(
+            c, "Foto penuh (tanpa crop)",
+            "Mode Foto memakai seluruh area sensor 4:3 (mis. 12 MP), jadi sedikit lebih lebar dari preview. " +
+                "Matikan agar foto sama persis dengan preview, tapi resolusinya lebih kecil (sekitar 10 MP). " +
+                "Tidak berlaku untuk Live Photo.",
+            Prefs.PHOTO_FULL_VIEW, true
+        )
+        switchRow(
             c, "Cerminkan foto kamera depan", "Hasil selfie sama seperti yang terlihat di preview.",
             Prefs.MIRROR_FRONT, true
-        )
-        switchRow(
-            c, "Foto penuh sensor (4:3, sekitar 12 MP)",
-            "Foto disimpan utuh tanpa dipotong mengikuti bentuk preview, jadi hasilnya lebih lebar dari preview. Matikan supaya foto dipotong persis seperti preview (sekitar 10 MP).",
-            Prefs.PHOTO_FULL_FRAME, true
-        )
-        switchRow(
-            c, "Foto resolusi penuh saat Live/Video (eksperimen)",
-            "Preview dan video dibagi satu aliran lewat GL supaya kamera boleh mengambil foto 12 MP sambil merekam (Live Photo). Hasilnya sama seperti tanpa EIS, kecuali EIS dinyalakan. Matikan jika preview terasa berat atau bermasalah.",
-            Prefs.HQ_STILL_SHARED, true
         )
 
         // ---- Video & Live Photo
