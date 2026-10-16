@@ -10,6 +10,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Range
+import android.util.Rational
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -34,6 +35,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -773,7 +775,13 @@ class XCameraController(
         sb.append("\nUkuran foto saat ini: ").append(if (still != null) "${still.width}x${still.height}" else "belum diketahui")
         val crop = try { imageCapture?.resolutionInfo?.cropRect } catch (e: Exception) { null }
         if (crop != null) sb.append("\nHasil foto (setelah crop): ").append("${crop.width()}x${crop.height()}")
-        sb.append("\nKonfigurasi: ").append(if (photoOnly) "mode Foto (tanpa video)" else "Video/Live (preview + foto + video)")
+        sb.append("\nKonfigurasi: ").append(
+            when {
+                photoOnly -> "mode Foto (tanpa video)"
+                liveShareBound -> "Live (preview+video satu stream, foto penuh)"
+                else -> "Video/Live (preview + foto + video, tiga stream)"
+            }
+        )
         sb.append("\nEIS: ").append(
             when {
                 !stabilizationSupported -> "tidak didukung kamera ini"
@@ -1042,6 +1050,14 @@ class XCameraController(
                     add(EisAttempt(null, false, false))
                     return@buildList
                 }
+                if (liveSharing) {
+                    // Live: Preview + Video dibagi satu stream lewat efek (pass-through saat EIS mati). Kamera hanya melihat
+                    // satu stream video + satu stream JPEG, kombinasi yang dijamin boleh memakai JPEG ukuran maksimum
+                    // (12 MP), padahal kombinasi tiga stream hanya mengizinkan JPEG sebesar video (sekitar 2 MP).
+                    val softNow = stabilizationOn && softOk
+                    add(EisAttempt(videoQuality, false, softNow, 0, true))
+                    if (lowerOk) add(EisAttempt(Quality.HD, false, softNow, 0, true))
+                }
                 if (stabilizationOn && (hwOk || softOk)) {
                     // Hardware (jika ada) + software sebagai cadangan; software hanya bekerja bila
                     // kamera tidak melaporkan EIS hardware menyala.
@@ -1060,8 +1076,8 @@ class XCameraController(
             val fpsTarget = if (videoFps > 0 && !fpsSuspended) videoFps else 0
             val attempts = buildList<EisAttempt> {
                 for (b in base) {
-                    if (fpsTarget > 0 && b.q != null) add(EisAttempt(b.q, b.hw, b.soft, fpsTarget))
-                    add(EisAttempt(b.q, b.hw, b.soft, 0))
+                    if (fpsTarget > 0 && b.q != null) add(EisAttempt(b.q, b.hw, b.soft, fpsTarget, b.share))
+                    add(EisAttempt(b.q, b.hw, b.soft, 0, b.share))
                 }
             }
             var bound: Camera? = null
@@ -1069,6 +1085,8 @@ class XCameraController(
             var boundVideo: VideoCapture<Recorder>? = null
             var boundHw = false
             var boundSoft = false
+            var boundEffect = false
+            var boundShare = false
             var boundFps = 0
             // Mode Foto penuh: tanpa ViewPort, foto memakai seluruh sensor 4:3 (mis. 12 MP) dan bukan potongan
             // setinggi preview (sekitar 10 MP). Foto jadi sedikit lebih lebar dari preview.
@@ -1100,8 +1118,8 @@ class XCameraController(
                 val capture = captureBuilder.build()
                 hwStabReported = false
                 val video = q?.let { buildVideo(it, rotation, at.hw, fps) }
-                val effect: SoftEisEffect? = if (at.soft && video != null) {
-                    val wantPreview = eisPreview()
+                val effect: SoftEisEffect? = if ((at.soft || at.share) && video != null) {
+                    val wantPreview = eisPreview() || at.share
                     val cached = softEffect
                     if (cached != null && cached.withPreview == wantPreview) cached
                     else SoftEisEffect(softProc(), wantPreview).also { softEffect = it }
@@ -1114,7 +1132,17 @@ class XCameraController(
                     .apply {
                         video?.let { addUseCase(it) }
                         effect?.let { addEffect(it) }
-                        if (!(photoOnly && wantFullView)) previewView.viewPort?.let { setViewPort(it) }
+                        if (liveSharing) {
+                            // Live: preview, video, dan foto sama-sama 3:4 (foto 12 MP tidak terpotong).
+                            val portrait = previewView.width < previewView.height
+                            setViewPort(
+                                ViewPort.Builder(if (portrait) Rational(3, 4) else Rational(4, 3), rotation)
+                                    .setScaleType(ViewPort.FILL_CENTER)
+                                    .build()
+                            )
+                        } else if (!(photoOnly && wantFullView)) {
+                            previewView.viewPort?.let { setViewPort(it) }
+                        }
                     }
                     .build()
                 try {
@@ -1123,7 +1151,9 @@ class XCameraController(
                     boundCapture = capture
                     boundVideo = video
                     boundHw = at.hw && video != null
-                    boundSoft = effect != null
+                    boundSoft = at.soft && effect != null
+                    boundEffect = effect != null
+                    boundShare = at.share && effect != null
                     boundFps = if (video != null) fps else 0
                     break
                 } catch (e: Exception) {
@@ -1157,7 +1187,8 @@ class XCameraController(
             softStabActive = boundSoft
             stabilizationActive = boundHw || boundSoft
             boundEisMode = eisCfgKey()
-            if (boundSoft) configureSoftEis(cam)
+            liveShareBound = boundShare
+            if (boundEffect) configureSoftEis(cam)
             supportedFps = if (boundVideo != null) queryFpsOptions(cam) else emptyList()
             effectiveFps = if (boundFps in supportedFps) boundFps else 0
             stabilizationSupported = boundVideo != null &&
@@ -1220,13 +1251,18 @@ class XCameraController(
     /** True di mode Foto: kamera dibuka hanya dengan preview + foto (tanpa video/EIS) supaya resolusi foto maksimal. */
     private var photoOnly = false
 
+    /** True di mode Live: preview dan video berbagi satu stream supaya foto Live bisa 12 MP. */
+    private var liveSharing = false
+    private var liveShareBound = false
+
     /**
-     * Mode Foto memakai konfigurasi tanpa video; Video dan Live memakai konfigurasi lengkap.
-     * Berpindah antar keduanya membuat kamera di-bind ulang sebentar (tidak saat merekam).
+     * Konfigurasi kamera per mode: Foto = tanpa video; Live = preview+video berbagi satu stream (foto 12 MP, 3:4);
+     * Video = konfigurasi biasa. Berpindah antar konfigurasi membuat kamera di-bind ulang sekali (tidak saat merekam).
      */
-    fun setPhotoOnly(photo: Boolean) {
-        if (photoOnly == photo) return
+    fun setModeConfig(photo: Boolean, live: Boolean) {
+        if (photoOnly == photo && liveSharing == live) return
         photoOnly = photo
+        liveSharing = live
         if (camera != null && !isRecording) bind(keepZoom = true)
     }
 
@@ -1278,7 +1314,8 @@ class XCameraController(
         }
     }
 
-    private class EisAttempt(val q: Quality?, val hw: Boolean, val soft: Boolean, val fps: Int = 0)
+    /** [share]: preview dan video berbagi satu stream lewat efek (pass-through bila [soft] false), supaya foto bisa resolusi penuh. */
+    private class EisAttempt(val q: Quality?, val hw: Boolean, val soft: Boolean, val fps: Int = 0, val share: Boolean = false)
 
     /**
      * Mode EIS hardware yang bisa diminta app pihak ketiga pada kamera pilihan [selector]:
@@ -1333,7 +1370,8 @@ class XCameraController(
         }
         proc.setStrength(prefs.getString(Prefs.EIS_STRENGTH, "normal") == "strong")
         proc.setFlip(eisFlip())
-        proc.bypassProvider = { hwStabRequested && hwStabReported }
+        // Pass-through bila EIS hardware yang bekerja, atau bila efek hanya dipakai untuk berbagi stream (EIS software mati).
+        proc.bypassProvider = { (hwStabRequested && hwStabReported) || !softStabActive }
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
