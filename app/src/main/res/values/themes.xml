@@ -1,3 +1,10 @@
 <resources>
-    <style name="Theme.XBoost" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.XCamera" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/xcam_cyan</item>
+        <item name="colorSecondary">@color/xcam_purple</item>
+        <item name="android:windowBackground">@color/xcam_bg</item>
+        <item name="android:statusBarColor">@color/xcam_bg</item>
+        <item name="android:navigationBarColor">@color/xcam_bg</item>
+        <item name="android:textColorPrimary">@color/xcam_text</item>
+    </style>
 </resources>
