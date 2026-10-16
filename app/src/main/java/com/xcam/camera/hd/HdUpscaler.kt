@@ -93,10 +93,15 @@ object HdUpscaler {
 
             src.recycle()
             src = null
-            FileOutputStream(output).use { dst.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-            val outW = dst.width
-            val outH = dst.height
-            dst.recycle()
+            // Simpan referensi non-null yang immutable agar Kotlin tidak perlu
+            // melakukan smart cast pada dst dari dalam lambda FileOutputStream.use.
+            val outputBitmap = dst ?: return Result(Status.FAILED, detail = "bitmap output kosong")
+            FileOutputStream(output).use { stream ->
+                outputBitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
+            }
+            val outW = outputBitmap.width
+            val outH = outputBitmap.height
+            outputBitmap.recycle()
             dst = null
 
             copyExif(input, output, outW, outH)
