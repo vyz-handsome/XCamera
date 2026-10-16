@@ -29,6 +29,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.xcam.camera.R
+import com.xcam.camera.hd.HdService
 import com.xcam.camera.livephoto.MotionPhotoWriter
 import com.xcam.camera.livephoto.LoopPhotoMaker
 import com.xcam.camera.settings.Prefs
@@ -87,6 +88,7 @@ class MediaViewerActivity : AppCompatActivity() {
         binding.btnBack.setOnClickListener { finish() }
         binding.btnShare.setOnClickListener { shareCurrent() }
         binding.btnLoop.setOnClickListener { showLoopDialog() }
+        binding.btnHd.setOnClickListener { onHdClicked() }
         binding.btnDelete.setOnClickListener { confirmDelete() }
 
         binding.pager.adapter = adapter
@@ -118,6 +120,27 @@ class MediaViewerActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        HdService.listener = object : HdService.Listener {
+            override fun onProgress(uri: Uri, percent: Int) {
+                if (current()?.uri == uri) updateInfo(binding.pager.currentItem)
+            }
+
+            override fun onDone(uri: Uri, success: Boolean) {
+                if (isDestroyed) return
+                if (success) adapter.notifyDataSetChanged()
+                updateInfo(binding.pager.currentItem)
+            }
+        }
+        updateInfo(binding.pager.currentItem)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        HdService.listener = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         io.shutdown()
@@ -128,7 +151,43 @@ class MediaViewerActivity : AppCompatActivity() {
     private fun updateInfo(position: Int) {
         val item = items.getOrNull(position) ?: return
         binding.btnLoop.visibility = if (item.isLive && !item.isLoop) View.VISIBLE else View.GONE
-        binding.tvInfo.text = "${dateFormat.format(item.dateMs)}  \u2022  ${position + 1}/${items.size}"
+        binding.btnHd.visibility = if (item.isLive && !item.isLoop) View.VISIBLE else View.GONE
+        val hdPct = HdService.progressOf(item.uri)
+        val hdText = when {
+            hdPct < 0 && HdService.isBusy(item.uri) -> "  \u2022  HD antre"
+            hdPct >= 0 -> "  \u2022  HD $hdPct%"
+            else -> ""
+        }
+        binding.tvInfo.text = "${dateFormat.format(item.dateMs)}  \u2022  ${position + 1}/${items.size}$hdText"
+    }
+
+    // ---- HD (pembesar AI 2x) untuk foto Live Photo
+
+    private fun onHdClicked() {
+        val item = current() ?: return
+        if (!item.isLive || item.isLoop) return
+        if (HdService.isBusy(item.uri)) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.hd_title)
+                .setMessage(R.string.hd_busy)
+                .setNegativeButton(R.string.loop_close, null)
+                .setPositiveButton(R.string.hd_cancel_job) { _, _ -> HdService.cancel(item.uri) }
+                .show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.hd_title)
+            .setMessage(R.string.hd_confirm)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.hd_start) { _, _ ->
+                if (HdService.enqueue(this, item.uri, item.isMotion)) {
+                    Toast.makeText(this, R.string.hd_started, Toast.LENGTH_SHORT).show()
+                    updateInfo(binding.pager.currentItem)
+                } else {
+                    Toast.makeText(this, R.string.hd_unavailable, Toast.LENGTH_LONG).show()
+                }
+            }
+            .show()
     }
 
     // ---- Loop Live Photo (video -> foto -> video ..., sekitar 60 detik)

@@ -46,5 +46,13 @@
     <string name="loop_play">Putar</string>
     <string name="loop_close">Tutup</string>
     <string name="loop_failed">Gagal membuat loop</string>
+    <string name="cd_hd">HD-kan foto Live Photo (AI 2x)</string>
     <string name="cd_loop">Buat loop Live Photo</string>
+    <string name="hd_title">HD foto Live Photo</string>
+    <string name="hd_confirm">Foto di Live Photo ini akan dibesarkan 2x dengan AI lokal (di HP, tanpa internet). Foto 12 MP jadi sekitar 48 MP, jadi file lebih besar dan prosesnya bisa memakan satu sampai beberapa menit. Video di dalamnya tidak berubah. Berjalan di latar belakang, foto lama baru diganti setelah selesai.</string>
+    <string name="hd_start">Mulai HD</string>
+    <string name="hd_started">HD diproses di latar belakang</string>
+    <string name="hd_busy">Foto ini sedang diproses HD.</string>
+    <string name="hd_cancel_job">Batalkan HD</string>
+    <string name="hd_unavailable">HD tidak bisa dijalankan sekarang</string>
 </resources>

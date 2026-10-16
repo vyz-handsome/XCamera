@@ -52,6 +52,20 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
+        <TextView
+            android:id="@+id/btnHd"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_marginEnd="20dp"
+            android:background="@drawable/bg_round_button"
+            android:contentDescription="@string/cd_hd"
+            android:gravity="center"
+            android:text="HD"
+            android:textColor="@color/xcam_cyan"
+            android:textSize="17sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
         <ImageButton
             android:id="@+id/btnLoop"
             android:layout_width="56dp"

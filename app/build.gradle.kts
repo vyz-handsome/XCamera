@@ -17,6 +17,24 @@ android {
         targetSdk = 34
         versionCode = runNumber
         versionName = "1.0.$runNumber"
+
+        ndk {
+            // HD (ncnn) hanya dibangun untuk HP 64-bit.
+            abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static")
+            }
+        }
+    }
+
+    ndkVersion = "26.3.11579264"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     // Keystore tetap (app/xcam.jks): tanda tangan APK sama di setiap build, syarat agar bisa di-update.

@@ -20,6 +20,8 @@ object Prefs {
     const val EIS_STRENGTH = "eis_strength"        // normal | strong (EIS software)
     const val EIS_PREVIEW = "eis_preview"          // boolean: preview ikut diproses EIS software (uji)
     const val EIS_FLIP = "eis_flip"                // 0..7: kalibrasi arah sumbu EIS software (uji)
+    const val HD_AUTO = "hd_auto"                  // boolean: foto biasa otomatis di-HD-kan 2x (default aktif)
+    const val HD_GPU = "hd_gpu"                    // boolean: HD pakai GPU (Vulkan), otomatis CPU kalau gagal
     const val ZOOM_SMOOTH = "zoom_smooth"          // fast | normal | soft
     const val ZOOM_SLIDER_ON_PINCH = "zoom_slider_pinch" // boolean
 

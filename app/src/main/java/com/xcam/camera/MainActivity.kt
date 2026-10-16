@@ -284,6 +284,10 @@ class MainActivity : AppCompatActivity(), XCameraController.Listener {
                 lastMediaUri = uri
                 lastMediaIsVideo = false
                 loadThumbnail(uri, false)
+                // HD otomatis (AI 2x) untuk foto biasa; foto asli tetap sampai HD selesai.
+                if (com.xcam.camera.settings.Prefs.of(this).getBoolean(com.xcam.camera.settings.Prefs.HD_AUTO, true)) {
+                    com.xcam.camera.hd.HdService.enqueue(this, uri, false)
+                }
             },
             onError = {
                 Toast.makeText(this, R.string.toast_photo_error, Toast.LENGTH_SHORT).show()

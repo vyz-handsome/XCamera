@@ -92,6 +92,21 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.MIRROR_FRONT, true
         )
 
+        // ---- HD
+        section(c, "HD (pembesar AI 2x)")
+        switchRow(
+            c, "HD otomatis untuk foto biasa",
+            "Setelah foto diambil di mode Foto, hasilnya otomatis dibesarkan 2x dengan AI di latar belakang " +
+                "(foto 12 MP jadi 48 MP, file lebih besar, prosesnya satu sampai beberapa menit per foto). " +
+                "Foto asli tetap aman sampai HD selesai. Live Photo tidak otomatis: pakai tombol HD di galeri.",
+            Prefs.HD_AUTO, true
+        )
+        switchRow(
+            c, "HD pakai GPU", "Lebih cepat. Kalau GPU HP bermasalah, XCAM otomatis pindah ke CPU. " +
+                "Matikan jika hasil HD tampak rusak.",
+            Prefs.HD_GPU, true
+        )
+
         // ---- Video & Live Photo
         section(c, "Video dan Live Photo")
         choiceRow(
